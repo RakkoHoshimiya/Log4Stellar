@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { markdownLinkSource } from '../util/historyResource';
 import * as vscode from 'vscode';
 import * as uri from 'vscode-uri';
 import { ILogger } from '../logging';
@@ -480,7 +481,7 @@ class MarkdownPreview extends Disposable implements WebviewResourceProvider {
 		}
 
 		// Create new file watchers.
-		const root = vscode.Uri.joinPath(this.#resource, '../');
+		const root = vscode.Uri.joinPath(markdownLinkSource(this.#resource), '../');
 		for (const src of srcs) {
 			const uri = urlToUri(src, root);
 			if (uri && !MarkdownPreview.#unwatchedImageSchemes.has(uri.scheme) && !this.#fileWatchersBySrc.has(src)) {
@@ -502,14 +503,15 @@ class MarkdownPreview extends Disposable implements WebviewResourceProvider {
 	}
 
 	#getLocalResourceRoots(): ReadonlyArray<vscode.Uri> {
-		return getMarkdownLocalResourceRoots(this.#resource, this.#contributionProvider.contributions.previewResourceRoots);
+		return getMarkdownLocalResourceRoots(markdownLinkSource(this.#resource), this.#contributionProvider.contributions.previewResourceRoots);
 	}
 
 	async #onDidClickPreviewLink(href: string) {
-		const config = vscode.workspace.getConfiguration('markdown', this.resource);
+		const source = markdownLinkSource(this.resource);
+		const config = vscode.workspace.getConfiguration('markdown', source);
 		const openLinks = config.get<string>('preview.openMarkdownLinks', 'inPreview');
 		if (openLinks === 'inPreview') {
-			const resolved = await this.#opener.resolveDocumentLink(href, this.resource);
+			const resolved = await this.#opener.resolveDocumentLink(href, source);
 			if (resolved?.kind === 'file') {
 				try {
 					const doc = await vscode.workspace.openTextDocument(vscode.Uri.from(resolved.uri));
@@ -522,7 +524,7 @@ class MarkdownPreview extends Disposable implements WebviewResourceProvider {
 			}
 		}
 
-		return this.#opener.openDocumentLink(href, this.resource);
+		return this.#opener.openDocumentLink(href, source);
 	}
 
 	//#region WebviewResourceProvider
@@ -560,6 +562,7 @@ export interface IManagedMarkdownPreview {
 	copyImage(id: string): void;
 	dispose(): void;
 	refresh(): void;
+	scrollTo(line: number): void;
 	updateConfiguration(): void;
 
 	matchesResource(
@@ -878,6 +881,10 @@ export class DynamicMarkdownPreview extends Disposable implements IManagedMarkdo
 		if (this.#previewConfigurations.hasConfigurationChanged(this.#preview.resource)) {
 			this.refresh();
 		}
+	}
+
+	public scrollTo(line: number): void {
+		this.#preview.scrollTo(line);
 	}
 
 	public update(newResource: vscode.Uri, scrollLocation?: StartingScrollLocation) {

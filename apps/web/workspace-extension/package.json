@@ -1,0 +1,94 @@
+{
+  "name": "workspace-files",
+  "displayName": "Log4Stellar Workspace",
+  "publisher": "log4stellar",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "browser": "./extension.js",
+  "activationEvents": [
+    "onFileSystem:vscode-test-web",
+    "onSearch:vscode-test-web",
+    "onCommand:log4stellar.workspace.git",
+    "onCommand:log4stellar.workspace.preview",
+    "onCommand:log4stellar.workspace.previewVersion",
+    "onCustomEditor:log4stellar.officePreview"
+  ],
+  "enabledApiProposals": [
+    "fileSearchProvider",
+    "textSearchProvider"
+  ],
+  "contributes": {
+    "resourceLabelFormatters": [
+      {
+        "scheme": "vscode-test-web",
+        "formatting": {
+          "label": "${path}",
+          "separator": "/"
+        }
+      }
+    ],
+    "commands": [
+      {
+        "command": "log4stellar.workspace.git",
+        "title": "Git",
+        "category": "Log4Stellar",
+        "icon": "$(git-branch)"
+      },
+      {
+        "command": "log4stellar.workspace.preview",
+        "title": "Preview document",
+        "category": "Log4Stellar",
+        "icon": "$(open-preview)"
+      },
+      {
+        "command": "log4stellar.workspace.previewVersion",
+        "title": "Preview document version",
+        "category": "Log4Stellar",
+        "icon": "$(history)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "log4stellar.workspace.git",
+          "when": "view == workbench.explorer.fileView",
+          "group": "navigation@100"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "log4stellar.workspace.preview",
+          "when": "resourceScheme == vscode-test-web && resourceExtname =~ /^\\.(docx|xlsx|pptx)$/",
+          "group": "navigation@20"
+        },
+        {
+          "command": "log4stellar.workspace.previewVersion",
+          "when": "resourceScheme == vscode-test-web && resourceExtname =~ /^\\.(docx|xlsx|pptx)$/",
+          "group": "navigation@21"
+        }
+      ]
+    },
+    "customEditors": [
+      {
+        "viewType": "log4stellar.officePreview",
+        "displayName": "Log4Stellar Office Preview",
+        "selector": [
+          {
+            "filenamePattern": "*.[dD][oO][cC][xX]"
+          },
+          {
+            "filenamePattern": "*.[xX][lL][sS][xX]"
+          },
+          {
+            "filenamePattern": "*.[pP][pP][tT][xX]"
+          }
+        ],
+        "priority": "option"
+      }
+    ]
+  }
+}

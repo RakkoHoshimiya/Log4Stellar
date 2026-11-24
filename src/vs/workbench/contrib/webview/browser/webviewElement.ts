@@ -262,6 +262,12 @@ export class WebviewElement extends Disposable implements IWebviewElement, Webvi
 			this._onFatalError.fire({ message: e.message });
 		}));
 
+		this._register(this.on('did-user-activity', ({ keyEventToken }) => {
+			if (this._keyEventToken && this._keyEventToken === keyEventToken && this.isActiveElement()) {
+				this.window?.dispatchEvent(new CustomEvent('vscode-webview-user-activity'));
+			}
+		}));
+
 		this._register(this.on('did-keydown', (data) => {
 			this.handleKeyEvent('keydown', data);
 		}));

@@ -854,6 +854,19 @@ export class MarkdownEditorProvider extends Disposable implements vscode.CustomT
 		};
 	}
 
+	public async revealOutlineHeading(range: vscode.Range): Promise<void> {
+		const active = Array.from(this.#navigation).find(([panel]) => panel.active)?.[1];
+		if (!active) {
+			return;
+		}
+		const cancellation = new vscode.CancellationTokenSource();
+		try {
+			await active.revealRange(range, { preserveFocus: true }, cancellation.token);
+		} finally {
+			cancellation.dispose();
+		}
+	}
+
 	public async executeCommand(command: string): Promise<void> {
 		const activeWebview = Array.from(this.#webviewPanels).find(([panel]) => panel.active)?.[1];
 		if (!activeWebview) {

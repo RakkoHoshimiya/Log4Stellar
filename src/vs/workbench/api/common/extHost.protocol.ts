@@ -2683,8 +2683,8 @@ export interface ExtHostFileSystemInfoShape {
 export interface ExtHostFileSystemShape {
 	$stat(handle: number, resource: UriComponents): Promise<files.IStat>;
 	$readdir(handle: number, resource: UriComponents): Promise<[string, files.FileType][]>;
-	$readFile(handle: number, resource: UriComponents): Promise<VSBuffer>;
-	$writeFile(handle: number, resource: UriComponents, content: VSBuffer, opts: files.IFileWriteOptions): Promise<void>;
+	$readFile(handle: number, resource: UriComponents, opts?: files.IFileAtomicReadOptions): Promise<VSBuffer>;
+	$writeFile(handle: number, resource: UriComponents, content: VSBuffer, opts: files.IFileWriteOptions): Promise<files.IStat | undefined>;
 	$rename(handle: number, resource: UriComponents, target: UriComponents, opts: files.IFileOverwriteOptions): Promise<void>;
 	$copy(handle: number, resource: UriComponents, target: UriComponents, opts: files.IFileOverwriteOptions): Promise<void>;
 	$mkdir(handle: number, resource: UriComponents): Promise<void>;

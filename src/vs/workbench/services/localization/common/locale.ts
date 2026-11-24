@@ -6,10 +6,14 @@
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { ILanguagePackItem } from '../../../../platform/languagePacks/common/languagePacks.js';
 
+export const DISPLAY_LANGUAGE_SETTING_ID = 'workbench.displayLanguage';
+export const AUTOMATIC_DISPLAY_LANGUAGE = 'auto';
+
 export const ILocaleService = createDecorator<ILocaleService>('localizationService');
 
 export interface ILocaleService {
 	readonly _serviceBrand: undefined;
+	getLocalePreference(): Promise<string | undefined>;
 	setLocale(languagePackItem: ILanguagePackItem, skipDialog?: boolean): Promise<void>;
 	clearLocalePreference(): Promise<void>;
 }

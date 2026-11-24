@@ -33,7 +33,8 @@
     "onLanguage:skill",
     "onCommand:markdown.api.render",
     "onCommand:markdown.api.reloadPlugins",
-    "onWebviewPanel:markdown.preview"
+    "onWebviewPanel:markdown.preview",
+    "onView:markdown.documentOutline"
   ],
   "capabilities": {
     "virtualWorkspaces": true,
@@ -48,6 +49,43 @@
     }
   },
   "contributes": {
+    "viewsContainers": {
+      "secondarySidebar": [
+        {
+          "id": "log4stellarHistory",
+          "title": "%markdown.history.title%",
+          "icon": "$(history)"
+        },
+        {
+          "id": "log4stellarTrash",
+          "title": "%markdown.trash.title%",
+          "icon": "$(trash)"
+        }
+      ]
+    },
+    "views": {
+      "log4stellarHistory": [
+        {
+          "id": "markdown.documentHistory",
+          "name": "%markdown.history.title%",
+          "when": "log4stellar.workspaceHistory"
+        }
+      ],
+      "log4stellarTrash": [
+        {
+          "id": "markdown.workspaceTrash",
+          "name": "%markdown.trash.title%",
+          "when": "log4stellar.workspaceTrash"
+        }
+      ],
+      "markdownOutline": [
+        {
+          "id": "markdown.documentOutline",
+          "name": "%markdown.outline.title%",
+          "visibility": "visible"
+        }
+      ]
+    },
     "linkPresentationProviders": [
       {
         "id": "markdown.gitCommitLinkPresentations",
@@ -145,6 +183,36 @@
       }
     ],
     "commands": [
+      {
+        "command": "markdown.documentHistory.compare",
+        "title": "%markdown.history.compare%",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "markdown.documentHistory.open",
+        "title": "%markdown.history.preview%",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "markdown.documentHistory.restore",
+        "title": "%markdown.history.restore%",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "markdown.documentHistory.save",
+        "title": "%markdown.history.save%",
+        "icon": "$(save-as)"
+      },
+      {
+        "command": "markdown.workspaceTrash.restore",
+        "title": "%markdown.trash.restore%",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "markdown.workspaceTrash.refresh",
+        "title": "%markdown.trash.refresh%",
+        "icon": "$(refresh)"
+      },
       {
         "command": "markdown.editor.triggerSuggest",
         "title": "%markdown.editor.triggerSuggest%",
@@ -649,6 +717,33 @@
       }
     ],
     "menus": {
+      "view/item/context": [
+        {
+          "command": "markdown.documentHistory.compare",
+          "when": "view == markdown.documentHistory && viewItem == log4stellarMarkdownHistoricalVersion",
+          "group": "navigation"
+        },
+        {
+          "command": "markdown.documentHistory.open",
+          "when": "view == markdown.documentHistory && viewItem == log4stellarMarkdownHistoricalVersion",
+          "group": "inline@1"
+        },
+        {
+          "command": "markdown.documentHistory.restore",
+          "when": "view == markdown.documentHistory && log4stellar.workspaceVersionRestore && (viewItem == log4stellarHistoricalVersion || viewItem == log4stellarMarkdownHistoricalVersion)",
+          "group": "inline@2"
+        },
+        {
+          "command": "markdown.documentHistory.save",
+          "when": "view == markdown.documentHistory && viewItem == log4stellarHistoricalVersion",
+          "group": "inline@3"
+        },
+        {
+          "command": "markdown.workspaceTrash.restore",
+          "when": "view == markdown.workspaceTrash",
+          "group": "inline"
+        }
+      ],
       "webview/context": [
         {
           "command": "_markdown.copyImage",
@@ -661,6 +756,13 @@
         {
           "command": "_markdown.openFrontMatterSettings",
           "when": "(webviewId == 'markdown.preview' || webviewId == 'vscode.markdown.preview.editor') && webviewSection == 'frontMatter'"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "markdown.workspaceTrash.refresh",
+          "when": "view == markdown.workspaceTrash",
+          "group": "navigation"
         }
       ],
       "editor/title": [
@@ -743,6 +845,30 @@
         }
       ],
       "commandPalette": [
+        {
+          "command": "markdown.documentHistory.compare",
+          "when": "false"
+        },
+        {
+          "command": "markdown.documentHistory.open",
+          "when": "false"
+        },
+        {
+          "command": "markdown.documentHistory.restore",
+          "when": "false"
+        },
+        {
+          "command": "markdown.documentHistory.save",
+          "when": "false"
+        },
+        {
+          "command": "markdown.workspaceTrash.restore",
+          "when": "false"
+        },
+        {
+          "command": "markdown.workspaceTrash.refresh",
+          "when": "false"
+        },
         {
           "command": "markdown.editor.triggerSuggest",
           "when": "activeCustomEditorId == 'vscode.markdown.editor'"
@@ -1617,6 +1743,10 @@
               "read",
               "edit"
             ],
+            "enumItemLabels": [
+              "%configuration.markdown.editor.initialMode.label.read%",
+              "%configuration.markdown.editor.initialMode.label.edit%"
+            ],
             "enumDescriptions": [
               "%configuration.markdown.editor.initialMode.read%",
               "%configuration.markdown.editor.initialMode.edit%"
@@ -2017,6 +2147,10 @@
             "enum": [
               "inPreview",
               "inEditor"
+            ],
+            "enumItemLabels": [
+              "%configuration.markdown.preview.openMarkdownLinks.label.inPreview%",
+              "%configuration.markdown.preview.openMarkdownLinks.label.inEditor%"
             ],
             "enumDescriptions": [
               "%configuration.markdown.preview.openMarkdownLinks.inPreview%",

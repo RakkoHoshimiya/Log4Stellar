@@ -12,7 +12,7 @@ import { toErrorMessage } from '../../../../base/common/errorMessage.js';
 import { Action } from '../../../../base/common/actions.js';
 import { dispose, IDisposable } from '../../../../base/common/lifecycle.js';
 import { VIEWLET_ID, IFilesConfiguration, UndoConfirmLevel } from '../common/files.js';
-import { IFileService } from '../../../../platform/files/common/files.js';
+import { FileSystemProviderCapabilities, IFileService } from '../../../../platform/files/common/files.js';
 import { EditorResourceAccessor, SideBySideEditor } from '../../../common/editor.js';
 import { IQuickInputService, ItemActivation } from '../../../../platform/quickinput/common/quickInput.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
@@ -84,7 +84,7 @@ async function refreshIfSeparator(value: string, explorerService: IExplorerServi
 	}
 }
 
-async function deleteFiles(explorerService: IExplorerService, workingCopyFileService: IWorkingCopyFileService, dialogService: IDialogService, configurationService: IConfigurationService, filesConfigurationService: IFilesConfigurationService, elements: ExplorerItem[], useTrash: boolean, skipConfirm = false, ignoreIfNotExists = false): Promise<void> {
+async function deleteFiles(explorerService: IExplorerService, workingCopyFileService: IWorkingCopyFileService, dialogService: IDialogService, configurationService: IConfigurationService, filesConfigurationService: IFilesConfigurationService, elements: ExplorerItem[], useTrash: boolean, skipConfirm = false, ignoreIfNotExists = false, serverTrash = false): Promise<void> {
 	let primaryButton: string;
 	if (useTrash) {
 		primaryButton = isWindows ? nls.localize('deleteButtonLabelRecycleBin', "&&Move to Recycle Bin") : nls.localize({ key: 'deleteButtonLabelTrash', comment: ['&& denotes a mnemonic'] }, "&&Move to Trash");
@@ -223,7 +223,7 @@ async function deleteFiles(explorerService: IExplorerService, workingCopyFileSer
 		let errorMessage: string;
 		let detailMessage: string | undefined;
 		let primaryButton: string;
-		if (useTrash) {
+		if (useTrash && !serverTrash) {
 			errorMessage = isWindows ? nls.localize('binFailed', "Failed to delete using the Recycle Bin. Do you want to permanently delete instead?") : nls.localize('trashFailed', "Failed to delete using the Trash. Do you want to permanently delete instead?");
 			detailMessage = deleteDetail;
 			primaryButton = nls.localize({ key: 'deletePermanentlyButtonLabel', comment: ['&& denotes a mnemonic'] }, "&&Delete Permanently");
@@ -240,14 +240,14 @@ async function deleteFiles(explorerService: IExplorerService, workingCopyFileSer
 		});
 
 		if (res.confirmed) {
-			if (useTrash) {
+			if (useTrash && !serverTrash) {
 				useTrash = false; // Delete Permanently
 			}
 
 			skipConfirm = true;
 			ignoreIfNotExists = true;
 
-			return deleteFiles(explorerService, workingCopyFileService, dialogService, configurationService, filesConfigurationService, elements, useTrash, skipConfirm, ignoreIfNotExists);
+			return deleteFiles(explorerService, workingCopyFileService, dialogService, configurationService, filesConfigurationService, elements, useTrash, skipConfirm, ignoreIfNotExists, serverTrash);
 		}
 	}
 }
@@ -1037,7 +1037,8 @@ export const moveFileToTrashHandler = async (accessor: ServicesAccessor) => {
 	const explorerService = accessor.get(IExplorerService);
 	const stats = explorerService.getContext(true).filter(s => !s.isRoot);
 	if (stats.length) {
-		await deleteFiles(accessor.get(IExplorerService), accessor.get(IWorkingCopyFileService), accessor.get(IDialogService), accessor.get(IConfigurationService), accessor.get(IFilesConfigurationService), stats, true);
+		await deleteFiles(accessor.get(IExplorerService), accessor.get(IWorkingCopyFileService), accessor.get(IDialogService), accessor.get(IConfigurationService), accessor.get(IFilesConfigurationService), stats, true, false, false,
+			stats.every(item => accessor.get(IFileService).hasCapability(item.resource, FileSystemProviderCapabilities.FileTrashUndo)));
 	}
 };
 
@@ -1046,7 +1047,9 @@ export const deleteFileHandler = async (accessor: ServicesAccessor) => {
 	const stats = explorerService.getContext(true).filter(s => !s.isRoot);
 
 	if (stats.length) {
-		await deleteFiles(accessor.get(IExplorerService), accessor.get(IWorkingCopyFileService), accessor.get(IDialogService), accessor.get(IConfigurationService), accessor.get(IFilesConfigurationService), stats, false);
+		const fileService = accessor.get(IFileService);
+		const useTrash = stats.every(item => fileService.hasCapability(item.resource, FileSystemProviderCapabilities.FileTrashUndo));
+		await deleteFiles(accessor.get(IExplorerService), accessor.get(IWorkingCopyFileService), accessor.get(IDialogService), accessor.get(IConfigurationService), accessor.get(IFilesConfigurationService), stats, useTrash, false, false, useTrash);
 	}
 };
 

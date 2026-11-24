@@ -1033,6 +1033,7 @@ export class TextFileEditorModel extends BaseTextEditorModel implements ITextFil
 					const stat = await this.textFileService.write(lastResolvedFileStat.resource, resolvedTextFileEditorModel.createSnapshot(), {
 						mtime: lastResolvedFileStat.mtime,
 						encoding: this.getEncoding(),
+						allowOverwriteWithoutVersion: options.ignoreModifiedSince || !this.filesConfigurationService.preventSaveConflicts(lastResolvedFileStat.resource, resolvedTextFileEditorModel.getLanguageId()),
 						etag: (options.ignoreModifiedSince || !this.filesConfigurationService.preventSaveConflicts(lastResolvedFileStat.resource, resolvedTextFileEditorModel.getLanguageId())) ? ETAG_DISABLED : lastResolvedFileStat.etag,
 						unlock: options.writeUnlock,
 						writeElevated: options.writeElevated

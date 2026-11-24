@@ -283,6 +283,12 @@ configurationRegistry.registerConfiguration({
 		'files.autoSave': {
 			'type': 'string',
 			'enum': [AutoSaveConfiguration.OFF, AutoSaveConfiguration.AFTER_DELAY, AutoSaveConfiguration.ON_FOCUS_CHANGE, AutoSaveConfiguration.ON_WINDOW_CHANGE],
+			'enumItemLabels': [
+				nls.localize('files.autoSave.label.off', "Off"),
+				nls.localize('files.autoSave.label.afterDelay', "After a Delay"),
+				nls.localize('files.autoSave.label.onFocusChange', "When the Editor Loses Focus"),
+				nls.localize('files.autoSave.label.onWindowChange', "When the Window Loses Focus"),
+			],
 			'markdownEnumDescriptions': [
 				nls.localize({ comment: ['This is the description for a setting. Values surrounded by single quotes are not to be translated.'], key: 'files.autoSave.off' }, "An editor with changes is never automatically saved."),
 				nls.localize({ comment: ['This is the description for a setting. Values surrounded by single quotes are not to be translated.'], key: 'files.autoSave.afterDelay' }, "An editor with changes is automatically saved after the configured `#files.autoSaveDelay#`."),

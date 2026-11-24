@@ -20,6 +20,10 @@ const localeStorage = new class LocaleStorage {
 	private static readonly LOCAL_STORAGE_LOCALE_KEY = 'vscode.nls.locale';
 	private static readonly LOCAL_STORAGE_EXTENSION_ID_KEY = 'vscode.nls.languagePackExtensionId';
 
+	getLocale(): string | undefined {
+		return localStorage.getItem(LocaleStorage.LOCAL_STORAGE_LOCALE_KEY) ?? undefined;
+	}
+
 	setLocale(locale: string): void {
 		localStorage.setItem(LocaleStorage.LOCAL_STORAGE_LOCALE_KEY, locale);
 		this.doSetLocaleToCookie(locale);
@@ -61,21 +65,16 @@ export class WebLocaleService implements ILocaleService {
 		@IProductService private readonly productService: IProductService
 	) { }
 
+	async getLocalePreference(): Promise<string | undefined> {
+		return localeStorage.getLocale();
+	}
+
 	async setLocale(languagePackItem: ILanguagePackItem, _skipDialog = false): Promise<void> {
 		const locale = languagePackItem.id;
-		if (locale === Language.value() || (!locale && Language.value() === navigator.language.toLowerCase())) {
+		if (locale && locale === Language.value()) {
+			localeStorage.setLocale(locale);
 			return;
 		}
-		if (locale) {
-			localeStorage.setLocale(locale);
-			if (languagePackItem.extensionId) {
-				localeStorage.setExtensionId(languagePackItem.extensionId);
-			}
-		} else {
-			localeStorage.clearLocale();
-			localeStorage.clearExtensionId();
-		}
-
 		const restartDialog = await this.dialogService.confirm({
 			type: 'info',
 			message: localize('relaunchDisplayLanguageMessage', "To change the display language, {0} needs to reload", this.productService.nameLong),
@@ -83,16 +82,25 @@ export class WebLocaleService implements ILocaleService {
 			primaryButton: localize({ key: 'reload', comment: ['&& denotes a mnemonic character'] }, "&&Reload"),
 		});
 
-		if (restartDialog.confirmed) {
-			this.hostService.restart();
+		if (!restartDialog.confirmed) {
+			return;
 		}
+		if (locale) {
+			localeStorage.setLocale(locale);
+			if (languagePackItem.extensionId) {
+				localeStorage.setExtensionId(languagePackItem.extensionId);
+			} else {
+				localeStorage.clearExtensionId();
+			}
+		} else {
+			localeStorage.clearLocale();
+			localeStorage.clearExtensionId();
+		}
+		this.hostService.restart();
 	}
 
 	async clearLocalePreference(): Promise<void> {
-		localeStorage.clearLocale();
-		localeStorage.clearExtensionId();
-
-		if (Language.value() === navigator.language.toLowerCase()) {
+		if (!localeStorage.getLocale()) {
 			return;
 		}
 
@@ -104,6 +112,8 @@ export class WebLocaleService implements ILocaleService {
 		});
 
 		if (restartDialog.confirmed) {
+			localeStorage.clearLocale();
+			localeStorage.clearExtensionId();
 			this.hostService.restart();
 		}
 	}

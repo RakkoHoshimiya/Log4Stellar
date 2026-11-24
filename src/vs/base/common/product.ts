@@ -115,6 +115,7 @@ export interface IProductConfiguration {
 	readonly applicationName: string;
 	readonly linuxDesktopName?: string;
 	readonly embedderIdentifier?: string;
+	readonly log4stellarWebAccount?: string;
 	readonly agentsTelemetryAppName?: string;
 
 	readonly urlProtocol: string;

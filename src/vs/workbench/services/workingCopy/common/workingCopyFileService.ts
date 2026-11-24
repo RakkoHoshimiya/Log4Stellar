@@ -130,6 +130,7 @@ export interface ICreateFileOperation extends ICreateOperation {
 
 export interface IDeleteOperation {
 	resource: URI;
+	trashId?: string;
 	useTrash?: boolean;
 	recursive?: boolean;
 }
@@ -475,7 +476,7 @@ export class WorkingCopyFileService extends Disposable implements IWorkingCopyFi
 		// now actually delete from disk
 		try {
 			for (const operation of operations) {
-				await this.fileService.del(operation.resource, { recursive: operation.recursive, useTrash: operation.useTrash });
+				await this.fileService.del(operation.resource, { recursive: operation.recursive, useTrash: operation.useTrash, trashId: operation.trashId });
 			}
 		} catch (error) {
 

@@ -5,7 +5,7 @@
 	<meta charset="UTF-8">
 
 	<meta http-equiv="Content-Security-Policy"
-		content="default-src 'none'; script-src 'sha256-mJlW7V1HtPghR7DIVKkjtQB+P4WPEn1mv458ONAbG60=' 'self'; frame-src 'self'; style-src 'unsafe-inline';">
+		content="default-src 'none'; script-src 'sha256-dL9qGq+u2fsE/GNKwbOUzB2gsj2orqkVIwoSiSxDnaY=' 'self'; frame-src 'self'; style-src 'unsafe-inline';">
 
 	<!-- Disable pinch zooming -->
 	<meta name="viewport"
@@ -607,6 +607,7 @@
 		 * @param {KeyboardEvent} e
 		 */
 		const handleInnerKeydown = (e) => {
+			reportUserActivity(e);
 			// If the keypress would trigger a browser event, such as copy or paste,
 			// make sure we block the browser from dispatching it. Instead VS Code
 			// handles these events and will dispatch a copy/paste back to the webview
@@ -779,12 +780,24 @@
 		})();
 		// #endregion Mouse activity forwarding
 
+		let lastUserActivity = -Infinity;
+
+		/** @param {Event} event */
+		const reportUserActivity = (event) => {
+			const now = performance.now();
+			if (event.isTrusted && now - lastUserActivity >= 500) {
+				lastUserActivity = now;
+				hostMessaging.postMessage('did-user-activity', { keyEventToken });
+			}
+		};
+
 		let isHandlingScroll = false;
 
 		/**
 		 * @param {WheelEvent} event
 		 */
 		const handleWheel = (event) => {
+			reportUserActivity(event);
 			if (isHandlingScroll) {
 				return;
 			}
@@ -1260,6 +1273,8 @@
 					});
 
 					// Bubble out various events
+					contentWindow.addEventListener('pointerup', reportUserActivity, true);
+					contentWindow.addEventListener('touchend', reportUserActivity, true);
 					contentWindow.addEventListener('click', handleInnerClick);
 					contentWindow.addEventListener('auxclick', handleAuxClick);
 					contentWindow.addEventListener('keydown', handleInnerKeydown);

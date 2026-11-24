@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { markdownLinkSource } from './util/historyResource';
 import type MarkdownIt from 'markdown-it';
 import * as vscode from 'vscode';
 import { extendMarkdownIt as extendMarkdownItWithFrontMatter } from './extensions/yamlPreamble/yamlPreamble';
@@ -203,7 +204,7 @@ export class MarkdownItEngine implements IMdParser {
 
 		const env: RenderEnv = {
 			containingImages: new Set<string>(),
-			currentDocument: typeof input === 'string' ? undefined : input.uri,
+			currentDocument: typeof input === 'string' ? undefined : markdownLinkSource(input.uri),
 			resourceProvider,
 			slugifier: this.slugifier.createBuilder(),
 		};
@@ -356,7 +357,7 @@ export class MarkdownItEngine implements IMdParser {
 			if (isOfScheme(Schemes.file, href)) {
 				const uri = vscode.Uri.parse(href);
 				if (resourceProvider) {
-					return resourceProvider.asWebviewUri(uri).toString(true);
+					return resourceProvider.asWebviewUri(uri).toString();
 				}
 				// Not sure how to resolve this
 				return href;
@@ -378,14 +379,15 @@ export class MarkdownItEngine implements IMdParser {
 						});
 
 						if (resourceProvider) {
-							return resourceProvider.asWebviewUri(uri).toString(true);
+							return resourceProvider.asWebviewUri(uri).toString();
 						} else {
 							uri = uri.with({ scheme: 'markdown-link' });
 						}
 					}
 				}
 
-				return uri.toString(true).replace(/^markdown-link:/, '');
+				// Keep encoded path characters such as %25 intact in the preview URL.
+				return uri.toString().replace(/^markdown-link:/, '');
 			}
 
 			return href;

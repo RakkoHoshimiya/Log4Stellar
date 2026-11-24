@@ -18,6 +18,8 @@ import { ResourceFileEdit } from '../../../../editor/browser/services/bulkEditSe
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { ITextFileService } from '../../../services/textfile/common/textfiles.js';
 import { Schemas } from '../../../../base/common/network.js';
+import { generateUuid } from '../../../../base/common/uuid.js';
+import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { extUriBiasedIgnorePathCase } from '../../../../base/common/resources.js';
 
 interface IFileOperation {
@@ -214,6 +216,36 @@ class DeleteEdit {
 	) { }
 }
 
+class RestoreFromTrashOperation implements IFileOperation {
+	constructor(
+		private readonly edits: { edit: DeleteEdit; trashId: string }[],
+		@ICommandService private readonly commandService: ICommandService,
+		@IInstantiationService private readonly instaService: IInstantiationService,
+	) { }
+
+	get uris(): URI[] {
+		return this.edits.map(({ edit }) => edit.oldUri);
+	}
+
+	async perform(_token: CancellationToken): Promise<IFileOperation> {
+		const groups = new Map<string, { resource: URI; ids: string[] }>();
+		for (const { edit, trashId } of this.edits) {
+			const resource = edit.oldUri;
+			const key = resource.with({ path: '/', query: '', fragment: '' }).toString();
+			let group = groups.get(key);
+			if (!group) {
+				group = { resource, ids: [] };
+				groups.set(key, group);
+			}
+			group.ids.push(trashId);
+		}
+		for (const { resource, ids } of groups.values()) {
+			await this.commandService.executeCommand('log4stellar.workspace.restoreTrashBatch', resource, ids);
+		}
+		return this.instaService.createInstance(DeleteOperation, this.edits.map(({ edit }) => edit), { isUndoing: true });
+	}
+}
+
 class DeleteOperation implements IFileOperation {
 
 	constructor(
@@ -235,6 +267,7 @@ class DeleteOperation implements IFileOperation {
 
 		const deletes: IDeleteOperation[] = [];
 		const undoes: CreateEdit[] = [];
+		const trashUndoes: { edit: DeleteEdit; trashId: string }[] = [];
 
 		for (const edit of this._edits) {
 			let fileStat: IFileStatWithMetadata | undefined;
@@ -247,11 +280,18 @@ class DeleteOperation implements IFileOperation {
 				continue;
 			}
 
+			const serverTrash = this._fileService.hasCapability(edit.oldUri, FileSystemProviderCapabilities.FileTrashUndo);
+			const trashId = serverTrash ? generateUuid() : undefined;
 			deletes.push({
 				resource: edit.oldUri,
 				recursive: edit.options.recursive,
-				useTrash: !edit.options.skipTrashBin && this._fileService.hasCapability(edit.oldUri, FileSystemProviderCapabilities.Trash) && this._configurationService.getValue<boolean>('files.enableTrash')
+				useTrash: serverTrash || (!edit.options.skipTrashBin && this._fileService.hasCapability(edit.oldUri, FileSystemProviderCapabilities.Trash) && this._configurationService.getValue<boolean>('files.enableTrash')),
+				trashId,
 			});
+			if (trashId) {
+				trashUndoes.push({ edit, trashId });
+				continue;
+			}
 
 			if (!fileStat.isFile && !fileStat.isDirectory) {
 				continue;
@@ -281,14 +321,33 @@ class DeleteOperation implements IFileOperation {
 
 		await this._workingCopyFileService.delete(deletes, token, this._undoRedoInfo);
 
-		if (undoes.length === 0) {
-			return new Noop();
+		const operations: IFileOperation[] = [];
+		if (undoes.length) {
+			operations.push(this._instaService.createInstance(CreateOperation, undoes, { isUndoing: true }));
 		}
-		return this._instaService.createInstance(CreateOperation, undoes, { isUndoing: true });
+		if (trashUndoes.length) {
+			operations.push(this._instaService.createInstance(RestoreFromTrashOperation, trashUndoes));
+		}
+		return operations.length > 1 ? new CombinedFileOperation(operations) : operations[0] ?? new Noop();
 	}
 
 	toString(): string {
 		return `(delete ${this._edits.map(edit => edit.oldUri).join(', ')})`;
+	}
+}
+
+class CombinedFileOperation implements IFileOperation {
+	constructor(private readonly operations: IFileOperation[]) { }
+
+	get uris(): URI[] {
+		return this.operations.flatMap(operation => operation.uris);
+	}
+
+	async perform(token: CancellationToken): Promise<IFileOperation> {
+		for (let i = 0; i < this.operations.length; i++) {
+			this.operations[i] = await this.operations[i].perform(token);
+		}
+		return this;
 	}
 }
 

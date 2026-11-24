@@ -39,6 +39,8 @@ import { IExtensionGalleryService, IExtensionManagementService, IGalleryExtensio
 import { IExtensionManifest } from '../../../../platform/extensions/common/extensions.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { IKeybindingService } from '../../../../platform/keybinding/common/keybinding.js';
+import { ILanguagePackService } from '../../../../platform/languagePacks/common/languagePacks.js';
+import { AUTOMATIC_DISPLAY_LANGUAGE, DISPLAY_LANGUAGE_SETTING_ID, ILocaleService } from '../../../services/localization/common/locale.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IManagedSettingsPresentationService } from '../../../services/configuration/common/managedSettingsPresentation.js';
 import { IProductService } from '../../../../platform/product/common/productService.js';
@@ -297,6 +299,8 @@ export class SettingsEditor2 extends EditorPane {
 		@IWorkbenchEnvironmentService private readonly environmentService: IWorkbenchEnvironmentService,
 		@IExperimentalSettingsService experimentalSettingsService: IExperimentalSettingsService,
 		@IManagedSettingsPresentationService managedSettingsPresentationService: IManagedSettingsPresentationService,
+		@ILanguagePackService private readonly languagePackService: ILanguagePackService,
+		@ILocaleService private readonly localeService: ILocaleService,
 	) {
 		super(SettingsEditor2.ID, group, telemetryService, themeService, storageService);
 		this.searchDelayer = this._register(new Delayer(200));
@@ -1304,7 +1308,29 @@ export class SettingsEditor2 extends EditorPane {
 		}));
 	}
 
+	private async changeDisplayLanguage(value: unknown): Promise<void> {
+		try {
+			if (value === undefined || value === AUTOMATIC_DISPLAY_LANGUAGE) {
+				await this.localeService.clearLocalePreference();
+				return;
+			}
+			const language = (await this.languagePackService.getInstalledLanguages()).find(pack => pack.id === value);
+			if (language) {
+				await this.localeService.setLocale(language);
+			}
+		} catch (error) {
+			this.logService.error(error);
+		} finally {
+			await this.onConfigUpdate(undefined, true);
+		}
+	}
+
 	private onDidChangeSetting(key: string, value: unknown, type: SettingValueType | SettingValueType[], manualReset: boolean, scope: ConfigurationScope | undefined): void {
+		if (key === DISPLAY_LANGUAGE_SETTING_ID) {
+			void this.changeDisplayLanguage(value);
+			return;
+		}
+
 		const parsedQuery = parseQuery(this.searchWidget.getValue());
 		const languageFilter = parsedQuery.languageFilter;
 		if (manualReset || (this.pendingSettingUpdate && this.pendingSettingUpdate.key !== key)) {
@@ -1478,6 +1504,34 @@ export class SettingsEditor2 extends EditorPane {
 		this.settingsOrderByTocIndex = this.createSettingsOrderByTocIndex(resolvedSettingsRoot);
 	}
 
+	private async getDisplayLanguageSetting(): Promise<ISetting | undefined> {
+		if (this.viewState.settingsTarget !== ConfigurationTarget.USER_LOCAL || this.environmentService.isSessionsWindow) {
+			return undefined;
+		}
+
+		const languages = (await this.languagePackService.getInstalledLanguages()).filter(pack => typeof pack.id === 'string');
+		if (languages.length === 0) {
+			return undefined;
+		}
+
+		return {
+			key: DISPLAY_LANGUAGE_SETTING_ID,
+			title: localize('displayLanguageSetting', "Display Language"),
+			categoryLabel: '',
+			range: nullRange,
+			keyRange: nullRange,
+			value: await this.localeService.getLocalePreference() ?? AUTOMATIC_DISPLAY_LANGUAGE,
+			valueRange: nullRange,
+			description: [localize('displayLanguageSettingDescription', "Choose the language used for the interface.")],
+			descriptionIsMarkdown: false,
+			descriptionRanges: [],
+			scope: ConfigurationScope.APPLICATION_MACHINE,
+			type: 'string',
+			enum: [AUTOMATIC_DISPLAY_LANGUAGE, ...languages.map(pack => pack.id!)],
+			enumItemLabels: [localize('displayLanguageAutomatic', "Automatic (Follow System)"), ...languages.map(pack => pack.label)],
+		};
+	}
+
 	private async onConfigUpdate(keys?: ReadonlySet<string>, forceRefresh = false, triggerSearch = false): Promise<void> {
 		if (keys && this.settingsTreeModel) {
 			return this.updateElementsByKey(keys);
@@ -1612,7 +1666,12 @@ export class SettingsEditor2 extends EditorPane {
 
 		resolvedSettingsRoot.children!.push(await createTocTreeForExtensionSettings(this.extensionService, extensionSettingsGroups, filter));
 
-		resolvedSettingsRoot.children!.unshift(getCommonlyUsedData(groups));
+		const commonlyUsed = getCommonlyUsedData(groups);
+		const displayLanguage = await this.getDisplayLanguageSetting();
+		if (displayLanguage) {
+			commonlyUsed.settings!.unshift(displayLanguage);
+		}
+		resolvedSettingsRoot.children!.unshift(commonlyUsed);
 
 		if (toggleData && setAdditionalGroups) {
 			// Add the additional groups to the model to help with searching.

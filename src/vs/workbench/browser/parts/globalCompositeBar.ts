@@ -49,6 +49,10 @@ import { ACTIVITY_BAR_BADGE_BACKGROUND, ACTIVITY_BAR_BADGE_FOREGROUND } from '..
 import { IBaseActionViewItemOptions } from '../../../base/browser/ui/actionbar/actionViewItems.js';
 import { ICommandService } from '../../../platform/commands/common/commands.js';
 import { IDefaultAccountService } from '../../../platform/defaultAccount/common/defaultAccount.js';
+import { IDialogService } from '../../../platform/dialogs/common/dialogs.js';
+import { INotificationService } from '../../../platform/notification/common/notification.js';
+import { IEditorService } from '../../services/editor/common/editorService.js';
+import { IWorkingCopyService } from '../../services/workingCopy/common/workingCopyService.js';
 import { WORKBENCH_MENU_MOTION_CLASS, workbenchMenuCloseAnimation } from '../actions/menuMotion.js';
 import { createCodexAccountMenuActions, ICodexAccountService, shouldShowCodexAccount } from '../../services/agentHost/browser/codexAccountService.js';
 
@@ -306,6 +310,10 @@ export class AccountsActivityActionViewItem extends AbstractGlobalActivityAction
 		@ICommandService private readonly commandService: ICommandService,
 		@ICodexAccountService private readonly codexAccountService: ICodexAccountService,
 		@IDefaultAccountService private readonly defaultAccountService: IDefaultAccountService,
+		@IDialogService private readonly dialogService: IDialogService,
+		@INotificationService private readonly notificationService: INotificationService,
+		@IEditorService private readonly editorService: IEditorService,
+		@IWorkingCopyService private readonly workingCopyService: IWorkingCopyService,
 	) {
 		const action = instantiationService.createInstance(CompositeBarAction, {
 			id: ACCOUNTS_ACTIVITY_ID,
@@ -454,6 +462,52 @@ export class AccountsActivityActionViewItem extends AbstractGlobalActivityAction
 		return accounts?.find(account => account.label === currentDefaultAccount.accountName)?.icon;
 	}
 
+	private async confirmWorkspaceSwitch(): Promise<boolean> {
+		if (this.workingCopyService.modifiedCount > 0) {
+			const confirmation = await this.dialogService.confirm({
+				type: 'warning',
+				message: localize('log4stellarSaveBeforeSwitchWorkspace', "Save your changes before switching workspaces?"),
+				primaryButton: localize('log4stellarSaveAndSwitchWorkspace', "Save and Switch"),
+			});
+			if (!confirmation.confirmed) { return false; }
+			const saved = await this.editorService.saveAll({ includeUntitled: { includeScratchpad: true } });
+			if (!saved.success || this.workingCopyService.modifiedCount > 0) { return false; }
+		}
+		return true;
+	}
+
+	private switchLog4StellarWorkspace(): void {
+		const onError = () => this.notificationService.error(localize('log4stellarSwitchWorkspaceFailed', "Could not load workspaces. Please try again."));
+		const onSelect = () => this.confirmWorkspaceSwitch();
+		if (getWindow(this.element).dispatchEvent(new CustomEvent('log4stellar-switch-workspace', { cancelable: true, detail: { onError, onSelect } }))) { onError(); }
+	}
+
+	private async endLog4StellarSession(switchAccount: boolean): Promise<void> {
+		if (this.workingCopyService.hasDirty) {
+			const confirmation = await this.dialogService.confirm({
+				type: 'warning',
+				message: localize('log4stellarSaveBeforeSignOut', "Save your changes before leaving this account?"),
+				primaryButton: localize('log4stellarSaveAndContinue', "Save and Continue"),
+			});
+			if (!confirmation.confirmed) {
+				return;
+			}
+			const saved = await this.editorService.saveAll({ includeUntitled: { includeScratchpad: true } });
+			if (!saved.success || this.workingCopyService.hasDirty) {
+				return;
+			}
+		}
+
+		const onError = () => this.notificationService.error(localize('log4stellarSignOutFailed', "Could not end the session. Please try again."));
+		const window = getWindow(this.element);
+		if (window.dispatchEvent(new CustomEvent('log4stellar-end-session', {
+			cancelable: true,
+			detail: { switchAccount, onError },
+		}))) {
+			onError();
+		}
+	}
+
 	//#region overrides
 
 	protected override async resolveMainMenuActions(accountsMenu: IMenu, disposables: DisposableStore): Promise<IAction[]> {
@@ -462,12 +516,43 @@ export class AccountsActivityActionViewItem extends AbstractGlobalActivityAction
 		const providers = this.authenticationService.getProviderIds().filter(p => !p.startsWith(INTERNAL_AUTH_PROVIDER_PREFIX));
 		const otherCommands = accountsMenu.getActions();
 		let menus: IAction[] = [];
+		const workspaceAccount = this.productService.log4stellarWebAccount;
+		if (workspaceAccount) {
+			menus.push(
+				disposables.add(new Action('log4stellar.currentAccount', localize('log4stellarCurrentAccount', "Signed in as {0}", workspaceAccount), undefined, false)),
+				toAction({
+					id: 'log4stellar.switchWorkspace',
+					label: localize('log4stellarSwitchWorkspace', "Switch Workspace..."),
+					run: () => this.switchLog4StellarWorkspace(),
+				}),
+				toAction({
+					id: 'log4stellar.accountSecurity',
+					label: localize('log4stellarAccountSecurity', "Account Security…"),
+					run: () => getWindow(this.element).open('/account/security', '_blank', 'noopener'),
+				}),
+				toAction({
+					id: 'log4stellar.switchAccount',
+					label: localize('log4stellarSwitchAccount', "Switch Account..."),
+					run: () => this.endLog4StellarSession(true),
+				}),
+				toAction({
+					id: 'log4stellar.signOut',
+					label: localize('log4stellarSignOut', "Sign Out"),
+					run: () => this.endLog4StellarSession(false),
+				}),
+			);
+			if (providers.length && this.initialized) {
+				menus.push(new Separator());
+			}
+		}
 
 		const registeredProviders = providers.filter(providerId => !this.authenticationService.isDynamicAuthenticationProvider(providerId));
 		const dynamicProviders = providers.filter(providerId => this.authenticationService.isDynamicAuthenticationProvider(providerId));
 
 		if (!this.initialized) {
-			menus.push(disposables.add(new Action('noAccountsAvailable', localize('loading', "Loading..."), undefined, false)));
+			if (!workspaceAccount) {
+				menus.push(disposables.add(new Action('noAccountsAvailable', localize('loading', "Loading..."), undefined, false)));
+			}
 		} else {
 
 			for (const providerId of registeredProviders) {
@@ -799,6 +884,10 @@ export class SimpleAccountActivityActionViewItem extends AccountsActivityActionV
 		@ICommandService commandService: ICommandService,
 		@ICodexAccountService codexAccountService: ICodexAccountService,
 		@IDefaultAccountService defaultAccountService: IDefaultAccountService,
+		@IDialogService dialogService: IDialogService,
+		@INotificationService notificationService: INotificationService,
+		@IEditorService editorService: IEditorService,
+		@IWorkingCopyService workingCopyService: IWorkingCopyService,
 	) {
 		super(() => simpleActivityContextMenuActions(storageService, true),
 			{
@@ -809,7 +898,7 @@ export class SimpleAccountActivityActionViewItem extends AccountsActivityActionV
 				}),
 				hoverOptions,
 				compact: true,
-			}, () => undefined, actions => actions, themeService, lifecycleService, hoverService, contextMenuService, menuService, contextKeyService, authenticationService, environmentService, productService, configurationService, keybindingService, secretStorageService, logService, activityService, instantiationService, commandService, codexAccountService, defaultAccountService);
+			}, () => undefined, actions => actions, themeService, lifecycleService, hoverService, contextMenuService, menuService, contextKeyService, authenticationService, environmentService, productService, configurationService, keybindingService, secretStorageService, logService, activityService, instantiationService, commandService, codexAccountService, defaultAccountService, dialogService, notificationService, editorService, workingCopyService);
 	}
 }
 

@@ -1,76 +1,375 @@
-# Visual Studio Code - Open Source ("Code - OSS")
-[![Feature Requests](https://img.shields.io/github/issues/microsoft/vscode/feature-request.svg)](https://github.com/microsoft/vscode/issues?q=is%3Aopen+is%3Aissue+label%3Afeature-request+sort%3Areactions-%2B1-desc)
-[![Bugs](https://img.shields.io/github/issues/microsoft/vscode/bug.svg)](https://github.com/microsoft/vscode/issues?utf8=✓&q=is%3Aissue+is%3Aopen+label%3Abug)
+# Log4Stellar
 
-## The Repository
+Log4Stellar 是一套以 Markdown 笔记为核心的自托管协作系统。它在经过裁剪的
+[Code - OSS](https://github.com/microsoft/vscode) 工作台之上，提供**远程工作区**（浏览器里的
+完整工作台，笔记存放在服务端）、多工作区权限隔离、文件与附件版本历史、回收站、增量同步与
+Git 仓库接入，并为 PC 与 Android 提供独立客户端。
 
-This repository ("`Code - OSS`") is where we (Microsoft) develop the [Visual Studio Code](https://code.visualstudio.com) product together with the community. Not only do we work on code and issues here, but we also publish our [roadmap](https://github.com/microsoft/vscode/wiki/Roadmap), [monthly iteration plans](https://github.com/microsoft/vscode/wiki/Iteration-Plans), and our [endgame plans](https://github.com/microsoft/vscode/wiki/Running-the-Endgame). This source code is available to everyone under the standard [MIT license](https://github.com/microsoft/vscode/blob/main/LICENSE.txt).
+所有内容保存在你自己的基础设施里：文件字节在 S3 兼容对象存储（本项目部署使用 RustFS），
+归属、路径、版本与变更记录在 PostgreSQL，账号、成员与角色在 SQLite。没有第三方云依赖，
+账号体系不外包。
 
-## Visual Studio Code
+**当前形态**：产品以 **Web 端为主**。浏览器访问服务端工作台即是主用形态；PC 与 Android
+客户端已各自实现并通过单元测试，但按 2026-11-24 的优先级安排**暂缓**（详见能力矩阵与
+[客户端](#客户端独立仓库)）。
 
-<p align="center">
-  <img alt="VS Code in action" src="https://github.com/user-attachments/assets/56af271c-949d-454c-a3ea-16188c063414">
-</p>
+## 快速上手
 
-[Visual Studio Code](https://code.visualstudio.com) is a distribution of the `Code - OSS` repository with Microsoft-specific customizations released under a traditional [Microsoft product license](https://code.visualstudio.com/License/).
+三步找到正在运行的产品入口：
 
-[Visual Studio Code](https://code.visualstudio.com) combines the simplicity of a code editor with what developers need for their core edit-build-debug cycle. It provides comprehensive code editing, navigation, and understanding support along with lightweight debugging, a rich extensibility model, and lightweight integration with existing tools.
+1. **看线上入口**。正式入口由部署方提供，形如 `https://<host>:<port>/`（生产环境的实际主机、
+   端口与发布包名记录在运维记录 `交付说明/ops-runbook.md`，不在本仓库内）。
+2. **确认服务活着**。用服务端证书请求登录页，返回 `200` 即正常：
 
-Visual Studio Code is updated monthly with new features and bug fixes. You can download it for Windows, macOS, and Linux on the [Visual Studio Code website](https://code.visualstudio.com/Download). To get the latest releases every day, install the [Insiders build](https://code.visualstudio.com/insiders).
+   ```bash
+   curl --cacert <server.crt> -s -o /dev/null -w '%{http_code}\n' https://<host>:<port>/login
+   # 200
+   ```
 
-## Contributing
+   同一个地址未登录访问 `/static/mount/`、`/sync/v1/snapshot`、`/git/v1/repository`
+   返回 `401`，说明网关、同步与 Git 路由都已挂上。
+3. **自己起一套隔离环境**。不需要碰生产：见 [apps/web/README.md](apps/web/README.md)
+   的「隔离环境最小启动」。跑测试用 `node --test apps/web/*.test.mjs`。
 
-There are many ways in which you can participate in this project, for example:
+要回退线上版本，看运维记录里的发布包切换与回滚流程（`交付说明/ops-runbook.md`）；本仓库内
+的能力状态以 [能力矩阵](#能力矩阵) 为准。
 
-* [Submit bugs and feature requests](https://github.com/microsoft/vscode/issues), and help us verify them as they are checked in
-* Review [source code changes](https://github.com/microsoft/vscode/pulls)
-* Review the [documentation](https://github.com/microsoft/vscode-docs) and make pull requests for anything from typos to new content.
+## 能力矩阵
 
-If you are interested in fixing issues and contributing directly to the codebase, please see the document [How to Contribute](https://github.com/microsoft/vscode/wiki/How-to-Contribute), which covers the following:
+状态取值，一个能力只取其中一档：
 
-* [How to build and run from source](https://github.com/microsoft/vscode/wiki/How-to-Contribute)
-* [The development workflow, including debugging and running tests](https://github.com/microsoft/vscode/wiki/How-to-Contribute#debugging)
-* [Coding guidelines](https://github.com/microsoft/vscode/wiki/Coding-Guidelines)
-* [Submitting pull requests](https://github.com/microsoft/vscode/wiki/How-to-Contribute#pull-requests)
-* [Finding an issue to work on](https://github.com/microsoft/vscode/wiki/How-to-Contribute#where-to-contribute)
-* [Contributing to translations](https://aka.ms/vscodeloc)
+| 状态 | 含义 |
+|---|---|
+| **已部署** | 代码在正式入口上运行，且已在新版发布包中实测 |
+| **已实现** | 代码与自动化测试就绪，但尚未在正式环境逐项验收 |
+| **待验收** | 功能已交付并通过本地测试，验收（真机 / 真实同步 / 安装包）尚未完成 |
+| **需配置** | 代码已合并、线上也已接线，但缺一项部署配置才能用 |
+| **规划中** | 有任务书或契约，尚未开始实现 |
 
-## Feedback
+| 能力 | 状态 | 说明 |
+|---|---|---|
+| Web 远程工作区（挂载、浏览、编辑、保存） | 已部署 | 浏览器里的完整工作台；自定义 FileSystemProvider 把服务端工作区挂载为工作台文件夹，笔记数据在服务端而非浏览器本地 |
+| Markdown 默认预览 | 已部署 | 打开 `.md` 直接进入预览；Diff 编辑器保持源码对照 |
+| 文件读写与并发保护 | 已部署 | 写入携带 `If-Match` 修订号，陈旧编辑器覆盖时返回 `412 FileChanged` |
+| 文件与附件版本历史 | 已部署 | 图片、Office、视频、二进制与 Markdown 同构；回滚生成新版本而非改写指针 |
+| 回收站与恢复 | 已部署 | 批量恢复、同名冲突保留副本、恢复前校验对象完整性 |
+| 范围读取（Range） | 已实现 | RFC 9110 单区间、`If-Range`、多区间降级为整体 `200`；有契约测试，线上未逐项走查 |
+| 多工作区权限隔离 | 已部署 | owner / editor / viewer 三档能力矩阵，判权只看 capability 不看 URL，跨工作区一律 `403 NoPermissions` |
+| 账号安全：密码、TOTP、恢复码、设备会话 | 已部署 | 登录页支持第二因素；工作台左下角原生账户菜单进入「账户安全…」，设置页在 `/account/security` |
+| 成员管理（增删成员、改角色） | 已部署 | **只有服务端命令行** `apps/web/workspace-members.mjs`，本版本不开放 HTTP 入口 |
+| 增量同步（服务端接口） | 已部署 | 工作区级快照 + 游标、幂等键、变更流、冲突副本保留双方内容；正式入口上 `/sync/v1/*` 已鉴权可达（未认证返回 `401`）。端到端的客户端同步仍待 PC / Android 验收 |
+| Git 仓库接入 | 需配置 | 关联仓库、状态、log、分支、fetch/push、检查点关联笔记版本均已实现并随正式包部署；但部署未设置 `LOG4STELLAR_GIT_WORKSPACE_ROOTS`，因此线上 `/git/v1/*` 目前一律返回 `503 GitNotConfigured` |
+| 工作区切换与多账号 | 已部署 | 工作台通过 `X-Log4Stellar-Workspace` 选择工作区；浏览器存储按「账号 + 工作区」隔离。挂载 URI 迁移的旧草稿恢复路径仍未实现，见[已知限制](#已知限制) |
+| PC 客户端 | 待验收 | Electron 独立工程，Linux 安装包已产出；Windows 安装包、完整入站增量镜像、重启后离线解锁、冲突操作界面仍未完成 |
+| Android 客户端 | 待验收 | Kotlin/Gradle 独立工程，APK 可构建；模拟器登录与真实同步未验收；旧账号数据作用域迁移、冲突处理界面、工作区选择仍待开发 |
+| 全文搜索（Markdown 正文、中文） | 待验收 | 服务端索引 + `GET /search/v1/query?q=` + 工作台搜索面板已实现；中文按子串匹配（PostgreSQL `simple` 分词会把整句变成一个词，无法命中词内子串）。索引更新是懒执行（每次查询最多补 25 条），无常驻 worker；端到端点选搜索面板尚未在真机走查 |
+| 知识关联（双链、标签、反向链接、断链） | 待验收 | Markdown AST 解析出链接与标签，建索引并提供 backlinks / tags / broken 接口与改名重写计划；工作台尚无反向链接、标签和断链面板 |
+| Office 文件预览（docx/xlsx/pptx → PDF） | 需配置 | 转换流水线、队列、租约、缓存与扩展入口均已实现并随包构建；默认关闭，需 `LOG4STELLAR_OFFICE_PREVIEW=1` 且容器内有 LibreOffice |
+| Web 离线编辑（草稿、离线队列、冲突） | 待验收 | IndexedDB 草稿 + 出站队列 + 幂等回放 + 冲突保留双方，离线模块尚未接入工作台编辑器，未做旧版草稿自动迁移 |
+| 多租户（租户、成员、邀请、审计） | 待验收 | 身份与成员在账户库，PostgreSQL 只存 `workspace_id → tenant_id` 映射；接口已实现，管理界面未做 |
+| 存储对象清理（标记-清扫） | 待验收 | 7 类引用探针 + 7 天宽限期 + CAS 候选状态机 + 恢复副本校验，**默认 dry-run**；尚未接 HTTP 入口、未在真实 RustFS 跑过全链路 |
+| 健康探针与指标（healthz/readyz/metrics） | 待验收 | 存活/就绪/Prometheus 三个端点已打入集成候选包，日志带 `requestId`；告警阈值与隔离演练尚未在正式环境验证 |
+| 组织级 / 工作区级强制双因素 | 规划中 | 每个受保护面已强制「已验证的第二因素」，但「管理员为整个工作区强制开启 2FA」需要策略存储与管理界面，属独立批次 |
+| 旧版未保存草稿的自动迁移与恢复 | 规划中（已知限制） | 见 [已知限制](#已知限制) |
 
-* Ask a question on [Stack Overflow](https://stackoverflow.com/questions/tagged/vscode)
-* [Request a new feature](CONTRIBUTING.md)
-* Upvote [popular feature requests](https://github.com/microsoft/vscode/issues?q=is%3Aopen+is%3Aissue+label%3Afeature-request+sort%3Areactions-%2B1-desc)
-* [File an issue](https://github.com/microsoft/vscode/issues)
-* Connect with the extension author community on [GitHub Discussions](https://github.com/microsoft/vscode-discussions/discussions) or [Slack](https://aka.ms/vscode-dev-community)
-* Follow [@code](https://x.com/code) and let us know what you think!
+「待验收」不等于「可用」：PC 与 Android 已按优先级暂缓，两端都还没有可交付给终端用户的完整
+安装流程。
 
-See our [wiki](https://github.com/microsoft/vscode/wiki/Feedback-Channels) for a description of each of these channels and information on some other available community-driven channels.
+「已部署」的判据是：该能力的代码在正式入口的发布包内、路由已在线上可达，且其数据在切换时完整
+迁移（迁移后笔记条目与历史版本数目不变）；「已实现」则只保证代码与自动化测试就绪，尚未在正式
+环境逐项走查。
 
-## Related Projects
+## 架构
 
-Many of the core components and extensions to VS Code live in their own repositories on GitHub. For example, the [node debug adapter](https://github.com/microsoft/vscode-node-debug) and the [mono debug adapter](https://github.com/microsoft/vscode-mono-debug) repositories are separate from each other. For a complete list, please visit the [Related Projects](https://github.com/microsoft/vscode/wiki/Related-Projects) page on our [wiki](https://github.com/microsoft/vscode/wiki).
+```
+                ┌───────────────────────────────────┐
+   浏览器 ─────▶│ serve-demo.mjs (HTTPS)             │
+                │   ├─ authGateway   (会话/租户/2FA)  │
+                │   ├─ /static/mount (文件/版本/回收站)│
+                │   ├─ /sync/v1      (增量同步)       │
+                │   └─ /git/v1       (Git 接入)       │
+                └───────────────┬───────────────────┘
+                                │
+              ┌─────────────────┼──────────────────┐
+              ▼                 ▼                  ▼
+        PostgreSQL           RustFS            auth.sqlite
+     归属/路径/版本/      文件字节          账号/成员/角色
+     变更流/快照                            第二因素/会话
+```
 
-## Bundled Extensions
+客户端（PC / Android）不经过工作台，直接调用 `/static/mount` 与 `/sync/v1`。
 
-VS Code includes a set of built-in extensions located in the [extensions](extensions) folder, including grammars and snippets for many languages. Extensions that provide rich language support (inline suggestions, Go to Definition) for a language have the suffix `language-features`. For example, the `json` extension provides coloring for `JSON` and the `json-language-features` extension provides rich language support for `JSON`.
+三条不变量贯穿全部代码：
 
-## Development Container
+1. **工作区 ID 唯一且一致**。`auth.sqlite` 的成员行、`storage_workspaces.id` 与对象存储的键前缀
+   使用同一个 ID，改名不换 ID。
+2. **权限是唯一的授权单位**。判权只看请求要做什么（`workspace.read` / `.history` / `.write` /
+   `.delete` / `.restore` / `.admin`），不看 HTTP 方法或 URL，且判权先于参数校验。
+3. **变更流与提交顺序一致**。序列号在工作区行锁内分配并持有到提交，读取方按序应用不会跳号。
 
-This repository includes a Visual Studio Code Dev Containers / GitHub Codespaces development container.
+## 部署方式
 
-* For [Dev Containers](https://aka.ms/vscode-remote/download/containers), use the **Dev Containers: Clone Repository in Container Volume...** command, which creates a Docker volume for better disk I/O on macOS and Windows.
-  * If you already have VS Code and Docker installed, you can also click [here](https://vscode.dev/redirect?url=vscode://ms-vscode-remote.remote-containers/cloneInVolume?url=https://github.com/microsoft/vscode) to get started. This will cause VS Code to automatically install the Dev Containers extension if needed, clone the source code into a container volume, and spin up a dev container for use.
+完整的部署、切换、回退与排障命令见 [apps/web/README.md](apps/web/README.md)；主机专有信息
+（真实主机名、端口、发布包名、证书路径）记录在运维记录 `交付说明/ops-runbook.md`。
 
-* For Codespaces, install the [GitHub Codespaces](https://marketplace.visualstudio.com/items?itemName=GitHub.codespaces) extension in VS Code, and use the **Codespaces: Create New Codespace** command.
+### 前置
 
-Docker / the Codespace should have at least **4 cores and 6 GB of RAM (8 GB recommended)** to run a full build. See the [development container README](.devcontainer/README.md) for more information.
+- Node.js **24.x**（发布包在 `release.json` 里校验 `nodeMajor`，其它大版本拒绝启动）
+- PostgreSQL 16 及以上，一个可建表的 schema
+- S3 兼容对象存储（RustFS / MinIO / AWS S3）
+- 一个 HTTPS 证书（自签可用于内网验收）
+- Git（发布构建与 Git 集成功能需要）
 
-## Code of Conduct
+### 构建发布包
 
-This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/). For more information, see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
+```bash
+export PATH=$HOME/.cache/log4stellar-toolchain/bin:$PATH   # node 24 + pnpm
+export NODE_OPTIONS=--max-old-space-size=5120              # 工作台打包需要 >2GB 堆
+node apps/web/build-web-release.mjs <新的空目录> [vscode-loc 本地副本]
+```
 
-## License
+三个必须注意的点：
 
-Copyright (c) Microsoft Corporation. All rights reserved.
+- `NODE_OPTIONS` 不设会报 `Ineffective mark-compacts near heap limit` 并以 SIGABRT 退出。
+- 第二个参数指向本地 `vscode-loc` 检出可避免构建期从 GitHub 下载语言包（离线环境必须）。
+- 构建会在开始与结束各取一次源码指纹（commit + `git diff` + 未跟踪文件摘要），中途有改动即报
+  `Source changed during release build. Build again from a stable worktree.`。**因此发布构建应在
+  专用工作树里做。**
 
-Licensed under the [MIT](LICENSE.txt) license.
+构建结束时自动执行 `verify-web-release.mjs`：在临时目录启动包内服务、建账号、断言登录页、
+未认证 401、敏感路径 404、本地化资源与扩展关联配置存在。
+
+### 运行
+
+```bash
+export LOG4STELLAR_AUTH_DIR=/srv/log4stellar/auth      # 必须在笔记工作区之外
+export LOG4STELLAR_WEB_ORIGIN=https://notes.example.com
+export LOG4STELLAR_TLS_CERT=/srv/tls/server.crt
+export LOG4STELLAR_TLS_KEY=/srv/tls/server.key
+export LOG4STELLAR_STORAGE_BACKEND=rustfs
+export LOG4STELLAR_STORAGE_CONFIG=/srv/log4stellar/workspace-storage.json
+export LOG4STELLAR_WORKSPACE_ID=log4stellar-main
+
+node server/serve-demo.mjs log4stellar-main 18990 --release
+```
+
+首次运行前需要生成 `$LOG4STELLAR_AUTH_DIR/secret`（`openssl rand -hex 32`，`umask 077`），并用
+`node server/create-account.mjs <用户名> <工作区 ID>` 建号。**建号时必须显式给出工作区 ID**
+（位置参数或 `LOG4STELLAR_WORKSPACE_ID`），否则账号会落到默认工作区而不是当前部署服务的工作区；
+命令会打印 ID 的来源，回落到默认值时给出警告。
+
+`workspace-storage.json` 形如（所有值都是占位符）：
+
+```json
+{
+  "s3": { "endpoint": "https://storage.example", "region": "us-east-1", "bucket": "log4stellar",
+          "accessKeyId": "<application access key>", "secretAccessKey": "<application secret>" },
+  "postgres": { "host": "database.example", "port": 5432, "database": "log4stellar",
+                "user": "user_agent", "password": "<database password>", "ssl": true }
+}
+```
+
+对象存储的 spool 目录由该文件的**所在目录**推导，因此配置文件目录必须可写；生产配置与 spool 是
+兄弟目录，把它复制到别处时会把 spool 一起搬走，隔离测试请复制配置再改内容。
+
+### 升级与回滚
+
+发布包是自包含的：把新包放到 `releases/<名字>`，原子替换 `current-web-release` 软链并重启即可。
+回滚只需重新指向上一版包，**不需要回滚数据库**——所有迁移都是纯增量的
+（`CREATE TABLE IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`），旧版本代码可以读取新库。
+
+有两条与回滚有关的硬约束，写在这里避免事故：
+
+- **不是每个历史包都能用来回滚**。早于「跨租户越权修复」的中间包（`web-access-01`）永远不可
+  作为回滚目标。
+- **启用双因素之后，回滚目标必须仍然执行双因素门禁**。更早的包只允许在隔离环境演练。
+
+数据库迁移是幂等的独立步骤：
+
+```bash
+node server/sync-migrate.mjs          # 可重复执行
+```
+
+## 数据与备份
+
+| 数据 | 位置 | 是否可重建 |
+|---|---|---|
+| 笔记文件字节 | 对象存储 `workspaces/<id>/sha256/<摘要>` | 否，必须备份 |
+| 归属 / 路径 / 版本 / 变更流 | PostgreSQL `log4stellar` schema | 否，必须备份 |
+| 账号 / 成员 / 角色 / 第二因素 / 会话 | `auth.sqlite` | 否，必须备份 |
+| TOTP 种子与恢复码的加密根 | `$LOG4STELLAR_AUTH_DIR/secret`（0600） | 否，**不可轮换、不可丢失** |
+| Git 仓库凭证的加密根 | 存储配置同目录的 `git-secret`（0600，64 hex） | 否，**不可轮换、不可丢失** |
+| 工作台构建产物 | `releases/<名字>` | 是，从 Git 重建 |
+
+`sha256` 内容寻址意味着恢复时可用摘要逐对象校验；`storage_file_versions` 保存每个版本的摘要
+与长度，是对象存储恢复的对照基准。
+
+完整备份包含账户库、两个密钥、数据库快照、逐对象摘要及笔记历史字节。维护窗口内暂停写入后，
+使用可读取所有相关工作区前缀的备份凭证执行：
+
+```bash
+LOG4STELLAR_BACKUP_BLOBS=1 node apps/web/backup-data.mjs /path/to/new-backup
+node apps/web/restore-backup-objects.mjs /path/to/new-backup /path/to/isolated-storage.json
+```
+
+恢复命令先验证清单和全部本地对象，再写入独立目标。数据库 SQL 和账户库应在隔离环境恢复，应用
+启动前核对目标配置与回滚兼容性。默认的元数据备份需要配套的对象存储备份；若生产凭证被限制在单个
+工作区前缀且禁止删除对象，则对象侧无法做桶级备份，需额外的只读凭证或存储卷级快照。
+
+密钥文件只允许记录**路径、用途与权限要求**，任何情况下不要把内容写进文档、提交或工单。
+
+## 仓库目录与入口
+
+```
+README.md                      本文件：定位、能力矩阵、部署与数据
+apps/web/                      服务端：网关、鉴权、文件、版本、同步、Git、发布打包
+  README.md                    部署与测试入口（含隔离启动、发布、回退、排障）
+  docs/                        协议与设计文档（权限、同步、账户安全、Git、工作区切换）
+  tools/                       仓库工具（相对链接检查）
+  workspace-extension/         Web 端的 workspace-files 扩展（挂载与搜索提供者）
+  *.test.mjs                   27 个测试文件（单元 + 需显式开启的集成测试）
+extensions/markdown-*/         Markdown 预览、大纲、版本历史与回收站面板、Mermaid、主题
+src/vs/                        Code - OSS 工作台源码（账户菜单等品牌化改动在此）
+build/, scripts/               上游工作台构建与打包脚本
+```
+
+入口一览：
+
+| 入口 | 是什么 |
+|---|---|
+| `/login` | 登录页，含第二因素表单 |
+| `/account/security` | 账户设置（改密、TOTP、恢复码、设备会话），从工作台左下角账户菜单打开 |
+| `/static/mount/` | 工作台挂载的文件系统后端（列表、读写、版本、回收站、Range） |
+| `/sync/v1/*` | 增量同步接口（快照、变更流、冲突） |
+| `/git/v1/*` | Git 仓库接入接口（需 `LOG4STELLAR_GIT_WORKSPACE_ROOTS`） |
+| `apps/web/serve-demo.mjs` | 唯一服务进程入口 |
+| `apps/web/build-web-release.mjs` | 发布包构建入口 |
+
+## 客户端（独立仓库）
+
+PC 与 Android 客户端**不在本仓库内**：它们是各自独立的 Git 仓库，所以在本仓库里
+`clients/` 目录并不存在，`git ls-files` 也查不到这两个工程。请不要在本仓库找它们的源码。
+
+| 工程 | 独立仓库位置（开发机） | 分支 | 技术栈 | 状态 |
+|---|---|---|---|---|
+| PC | `clients/pc`（独立 Git 仓库） | `feat/pc-remote-sync` | Electron + esbuild + markdown-it | 待验收 |
+| Android | `clients/android`（独立 Git 仓库） | `feat/android-client` | Kotlin + Gradle（compileSdk 34 / minSdk 26） | 待验收 |
+
+两端都通过 `/static/mount` 与 `/sync/v1` 直连服务端，不经过工作台。构建与验收步骤以各自仓库内的
+说明为准（Android 工程的 `README.md` 尚未补，交付说明里记录了构建与验收方式）。按当前优先级，
+两端暂缓，Web 端优先。
+
+## 文档索引
+
+新增或变更功能时，**下面这些文档必须随代码一起改**，否则读者会得到与实现相反的结论：
+
+| 文档 | 何时必须同步修改 |
+|---|---|
+| 本文件 [能力矩阵](#能力矩阵) | 任何能力的状态在 已实现/已部署/待验收/需配置/规划中 之间变化时 |
+| [apps/web/README.md](apps/web/README.md) | 启动参数、必需环境变量、发布/回退步骤、测试开启方式变化时 |
+| [工作区权限契约](apps/web/docs/workspace-access.md) | 角色、capability 或请求→能力映射变化时 |
+| [增量同步契约](apps/web/docs/incremental-sync.md) | `/sync/v1` 路由、请求头、游标或冲突语义变化时 |
+| [账户安全契约](apps/web/docs/account-security.md) | 第二因素流程、会话、恢复码、DDL 变化时 |
+| [账户安全运行时交付](apps/web/docs/account-security-takeover.md) | 账户安全的分支范围、验收入口变化时 |
+| [Git 接入契约](apps/web/docs/git-integration.md) | `/git/v1` 路由、判权、错误码或部署配置变化时 |
+| [工作区切换迁移](apps/web/docs/workspace-switch-migration.md) | 工作台挂载 URI 或旧草稿恢复策略变化时 |
+| [发布清单模板](apps/web/docs/release-checklist.md) | 每次产出并切换发布包时；它本身也维护着上面这张对照表 |
+| [构建与持续集成](apps/web/docs/build-and-ci.md) | 构建入口、CI 入口、`.nvmrc` 或发布包清单（`serverFiles`）变化时 |
+| [部署与回退](apps/web/docs/deploy-and-rollback.md) | 发布包切换、回退策略、双因素回退约束或开机拉起方式变化时 |
+| [备份与恢复](apps/web/docs/backup-restore.md) | 备份成员契约、加密信封、恢复顺序或保留策略变化时 |
+| [运行监控](apps/web/docs/monitoring.md) | 探针端点、指标名/单位、告警阈值或日志字段变化时 |
+| [容量与保留](apps/web/docs/capacity.md) | 并发上限、队列深度、超时或磁盘回收规则变化时 |
+| [多租户](apps/web/docs/multi-tenant.md) | 租户/成员/邀请/审计接口或 `tenant_id` 映射语义变化时 |
+| [Web 离线编辑](apps/web/docs/web-offline.md) | IndexedDB 结构、离线有效期、回放或冲突语义变化时 |
+| [权限与供应链](apps/web/docs/supply-chain.md) | 凭证清单、TLS 到期、依赖固定或密钥扫描规则变化时 |
+
+另外两条机械约束，改代码时容易漏：
+
+- **新增服务端文件必须加进 `apps/web/build-web-release.mjs` 的 `serverFiles` 数组**，否则发布包
+  里没有该文件，线上启动时才报错。
+- **改完文档跑一次相对链接与锚点检查**：
+
+  ```bash
+  node apps/web/tools/check-doc-links.mjs        # 失败非零退出
+  node apps/web/tools/check-doc-links.mjs --list # 列出每条解析成功的链接
+  ```
+
+  脚本只校验仓库内的相对链接与 GitHub 风格锚点，外部链接只计数不抓取，因此可离线运行。
+
+## 已知限制
+
+**旧版未保存草稿不能自动迁移。** 旧版本的工作台用 `vscode-test-web://mount-<账号>/` 表示当时
+默认的工作区，这个 URI 不记录工作区 ID，而默认工作区在成员被撤销后会变化，因此「当前选中的工作区」
+不能作为旧草稿来源的证据。当前版本改用 `mount-<账号>.<工作区>` 并拒绝 legacy 与空 authority。
+旧草稿需要独立的、非破坏性的恢复流程（枚举旧备份、允许导出或显式放置、保留原件，并用成员变更、
+多账号、取消恢复与回滚来验证），**该流程尚未实现**；在此之前不要删除浏览器数据，也不要假设旧草稿
+会被自动搬进当前工作区。详见
+[工作区切换迁移说明](apps/web/docs/workspace-switch-migration.md)。
+
+其它已知限制：
+
+- **集成候选包**支持当前工作区内的 Markdown 正文搜索。浏览器内从搜索结果跳到匹配处仍需验收。
+- **组织级强制双因素**未实现：目前是「每个受保护面强制已验证的第二因素」，不是「管理员为整个
+  工作区强制所有成员开通 2FA」。
+- **Git 集成为按部署可选项**：未配置 `LOG4STELLAR_GIT_WORKSPACE_ROOTS` 时 `/git/v1/*` 恒返回
+  `503 GitNotConfigured`，且不能关联任何仓库。
+- **工作区成员管理没有 HTTP 入口**，只能由运维在服务端执行命令行。
+- 工作台浏览器存储键随 `applicationName` 变化，品牌化之后旧 profile 的工作台布局状态不会继承
+  （笔记内容不受影响）。
+
+## 参考来源
+
+产品在同步与冲突体验上参考了 [Joplin](https://github.com/laurent22/joplin)，
+在目录导航与 Markdown 交互上参考了 [Logseq](https://github.com/logseq/logseq)。
+代码为独立实现，未引入上游源码。
+
+## 第三方许可证
+
+本项目基于 MIT 许可的 Code - OSS 修改而来，上游版权与许可见 [LICENSE.txt](LICENSE.txt)
+与 [ThirdPartyNotices.txt](ThirdPartyNotices.txt)。在此之上新增的依赖：
+
+**服务端（`apps/web`）**
+
+| 依赖 | 版本 | 许可 |
+|---|---|---|
+| @aws-sdk/client-s3 | 3.1173.0 | Apache-2.0 |
+| @node-rs/argon2 | 2.2.2 | MIT |
+| @vscode/test-web | 0.0.81 | MIT |
+| better-auth | 1.7.27 | MIT |
+| pg | 8.23.1 | MIT |
+| qrcode-generator | 2.0.4 | MIT |
+
+`qrcode-generator` 用于在服务端本地生成第二因素绑定二维码，不调用外部二维码服务。
+
+**PC 客户端（`clients/pc`）**
+
+| 依赖 | 版本 | 许可 |
+|---|---|---|
+| dompurify | ^3.2.4 | MPL-2.0 OR Apache-2.0 |
+| markdown-it | ^14.1.0 | MIT |
+| electron（开发） | 38.8.6 | MIT |
+| electron-builder（开发） | ^25.1.8 | MIT |
+| esbuild（开发） | ^0.24.2 | MIT |
+
+注意 `dompurify` 是双许可（MPL-2.0 或 Apache-2.0），分发时需保留其许可声明。
+
+**Android 客户端（`clients/android`）**
+
+| 依赖 | 版本 | 许可 |
+|---|---|---|
+| androidx.core:core-ktx | 1.13.1 | Apache-2.0 |
+| androidx.appcompat:appcompat | 1.7.0 | Apache-2.0 |
+| com.google.android.material:material | 1.12.0 | Apache-2.0 |
+| androidx.recyclerview:recyclerview | 1.3.2 | Apache-2.0 |
+| androidx.lifecycle:lifecycle-runtime-ktx | 2.8.4 | Apache-2.0 |
+| androidx.activity:activity-ktx | 1.9.1 | Apache-2.0 |
+| org.jetbrains.kotlinx:kotlinx-coroutines-android | 1.8.1 | Apache-2.0 |
+| com.squareup.okhttp3:okhttp | 4.12.0 | Apache-2.0 |
+
+Android 侧的 `junit`、`mockwebserver`、`kotlinx-coroutines-test` 仅用于测试，不随 APK 分发。
+
+## 许可
+
+上游 Code - OSS 部分：Copyright (c) Microsoft Corporation，MIT 许可。
+
+本项目新增部分：同样以 MIT 许可发布，详见 [LICENSE.txt](LICENSE.txt)。

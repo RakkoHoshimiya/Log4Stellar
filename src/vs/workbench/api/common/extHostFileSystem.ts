@@ -129,7 +129,7 @@ export class ExtHostFileSystem implements ExtHostFileSystemShape {
 		this._linkProviderRegistration?.dispose();
 	}
 
-	registerFileSystemProvider(extension: IExtensionDescription, scheme: string, provider: vscode.FileSystemProvider, options: { isCaseSensitive?: boolean; isReadonly?: boolean | vscode.MarkdownString } = {}) {
+	registerFileSystemProvider(extension: IExtensionDescription, scheme: string, provider: vscode.FileSystemProvider, options: { isCaseSensitive?: boolean; serverVersioned?: boolean; serverTrash?: boolean; isReadonly?: boolean | vscode.MarkdownString } = {}) {
 
 		// validate the given provider is complete
 		ExtHostFileSystem._validateFileSystemProvider(provider);
@@ -151,6 +151,12 @@ export class ExtHostFileSystem implements ExtHostFileSystemShape {
 		let capabilities = files.FileSystemProviderCapabilities.FileReadWrite;
 		if (options.isCaseSensitive) {
 			capabilities += files.FileSystemProviderCapabilities.PathCaseSensitive;
+		}
+		if (options.serverTrash) {
+			capabilities |= files.FileSystemProviderCapabilities.Trash | files.FileSystemProviderCapabilities.FileTrashUndo;
+		}
+		if (options.serverVersioned) {
+			capabilities |= files.FileSystemProviderCapabilities.FileRevision;
 		}
 		if (options.isReadonly) {
 			capabilities += files.FileSystemProviderCapabilities.Readonly;
@@ -248,9 +254,9 @@ export class ExtHostFileSystem implements ExtHostFileSystemShape {
 		}
 	}
 
-	private static _asIStat(stat: vscode.FileStat): files.IStat {
-		const { type, ctime, mtime, size, permissions } = stat;
-		return { type, ctime, mtime, size, permissions };
+	private static _asIStat(stat: vscode.FileStat & { etag?: string }): files.IStat {
+		const { type, ctime, mtime, size, permissions, etag } = stat;
+		return { type, ctime, mtime, size, permissions, etag };
 	}
 
 	$stat(handle: number, resource: UriComponents): Promise<files.IStat> {
@@ -261,12 +267,19 @@ export class ExtHostFileSystem implements ExtHostFileSystemShape {
 		return Promise.resolve(this._getFsProvider(handle).readDirectory(URI.revive(resource)));
 	}
 
-	$readFile(handle: number, resource: UriComponents): Promise<VSBuffer> {
-		return Promise.resolve(this._getFsProvider(handle).readFile(URI.revive(resource))).then(data => VSBuffer.wrap(data));
+	$readFile(handle: number, resource: UriComponents, opts?: files.IFileAtomicReadOptions): Promise<VSBuffer> {
+		const provider = this._getFsProvider(handle) as vscode.FileSystemProvider & {
+			readFile(uri: vscode.Uri, options?: files.IFileAtomicReadOptions): Uint8Array | Thenable<Uint8Array>;
+		};
+		return Promise.resolve(provider.readFile(URI.revive(resource), opts)).then(data => VSBuffer.wrap(data));
 	}
 
-	$writeFile(handle: number, resource: UriComponents, content: VSBuffer, opts: files.IFileWriteOptions): Promise<void> {
-		return Promise.resolve(this._getFsProvider(handle).writeFile(URI.revive(resource), content.buffer, opts));
+	async $writeFile(handle: number, resource: UriComponents, content: VSBuffer, opts: files.IFileWriteOptions): Promise<files.IStat | undefined> {
+		const provider = this._getFsProvider(handle) as {
+			writeFile(uri: vscode.Uri, bytes: Uint8Array, options: files.IFileWriteOptions): void | files.IStat | Thenable<void | files.IStat>;
+		};
+		const stat = await provider.writeFile(URI.revive(resource), content.buffer, opts);
+		return stat || undefined;
 	}
 
 	$delete(handle: number, resource: UriComponents, opts: files.IFileDeleteOptions): Promise<void> {

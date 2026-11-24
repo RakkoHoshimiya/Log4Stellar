@@ -19,6 +19,8 @@ import { MarkdownEditorProvider } from './preview/markdownEditorProvider';
 import { createSharedLinkPresentationService, registerLinkPresentationProvider } from './preview/linkPresentation/linkPresentationService';
 import { MdDocumentRenderer } from './preview/documentRenderer';
 import { MarkdownPreviewManager } from './preview/previewManager';
+import { registerMarkdownDocumentHistory } from './documentHistory';
+import { MarkdownDocumentOutline } from './documentOutline';
 import { ExtensionContentSecurityPolicyArbiter } from './preview/security';
 import { loadDefaultTelemetryReporter } from './telemetryReporter';
 import { MdLinkOpener } from './util/openDocumentLink';
@@ -76,7 +78,8 @@ export function activateShared(
 		(href, fromResource) => linkPresentationService.openLink(href, fromResource),
 		telemetryReporter,
 	);
-	context.subscriptions.push(markdownEditorProvider);
+	context.subscriptions.push(markdownEditorProvider, new MarkdownDocumentOutline(engine, previewManager, markdownEditorProvider));
+	void registerMarkdownDocumentHistory(context, previewManager);
 	// Subscriptions are disposed in order: keep the reporter alive until the Markdown editor
 	// has reported its open sessions, in case `deactivate` did not run.
 	context.subscriptions.push(telemetryReporter);

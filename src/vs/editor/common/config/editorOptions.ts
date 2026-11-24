@@ -6994,6 +6994,12 @@ export const EditorOptions = {
 		'off' as 'off' | 'on' | 'wordWrapColumn' | 'bounded',
 		['off', 'on', 'wordWrapColumn', 'bounded'] as const,
 		{
+			enumItemLabels: [
+				nls.localize('wordWrap.label.off', "Off"),
+				nls.localize('wordWrap.label.on', "Fit to Editor Width"),
+				nls.localize('wordWrap.label.column', "At the Configured Column"),
+				nls.localize('wordWrap.label.bounded', "Fit to Width or Column"),
+			],
 			markdownEnumDescriptions: [
 				nls.localize('wordWrap.off', "Lines will never wrap."),
 				nls.localize('wordWrap.on', "Lines will wrap at the viewport width."),

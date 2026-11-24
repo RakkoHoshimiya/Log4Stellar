@@ -82,6 +82,8 @@ export class MarkdownPreviewManager extends Disposable implements vscode.Webview
 	readonly #staticPreviews = this._register(new PreviewStore<StaticMarkdownPreview>());
 
 	#activePreview: IManagedMarkdownPreview | undefined = undefined;
+	readonly #onDidChangeActivePreview = this._register(new vscode.EventEmitter<void>());
+	public readonly onDidChangeActivePreview = this.#onDidChangeActivePreview.event;
 
 	readonly #contentProvider: MdDocumentRenderer;
 	readonly #logger: ILogger;
@@ -155,6 +157,15 @@ export class MarkdownPreviewManager extends Disposable implements vscode.Webview
 			resource,
 			scrollLocation
 		);
+	}
+
+	public revealActivePreviewLine(resource: vscode.Uri, line: number): boolean {
+		const preview = this.#activePreview;
+		if (!preview || preview.resource.toString() !== resource.toString()) {
+			return false;
+		}
+		preview.scrollTo(line);
+		return true;
 	}
 
 	public get activePreviewResource() {
@@ -390,7 +401,11 @@ export class MarkdownPreviewManager extends Disposable implements vscode.Webview
 
 	#trackActive(preview: IManagedMarkdownPreview): void {
 		preview.onDidChangeViewState(({ webviewPanel }) => {
-			this.#setActivePreview(webviewPanel.active ? preview : undefined);
+			if (webviewPanel.active) {
+				this.#setActivePreview(preview);
+			} else if (this.#activePreview === preview) {
+				this.#setActivePreview(undefined);
+			}
 		});
 
 		preview.onDispose(() => {
@@ -403,6 +418,7 @@ export class MarkdownPreviewManager extends Disposable implements vscode.Webview
 	#setActivePreview(preview: IManagedMarkdownPreview | undefined): void {
 		this.#activePreview = preview;
 		this.#renderedDiffWarning.setActiveDiffPreview(!!preview?.isDiffView);
+		this.#onDidChangeActivePreview.fire();
 	}
 
 }

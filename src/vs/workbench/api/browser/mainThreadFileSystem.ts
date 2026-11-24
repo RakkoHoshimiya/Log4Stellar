@@ -6,7 +6,7 @@
 import { Emitter, Event } from '../../../base/common/event.js';
 import { IDisposable, toDisposable, DisposableStore, DisposableMap } from '../../../base/common/lifecycle.js';
 import { URI, UriComponents } from '../../../base/common/uri.js';
-import { IFileWriteOptions, FileSystemProviderCapabilities, IFileChange, IFileService, IStat, IWatchOptions, FileType, IFileOverwriteOptions, IFileDeleteOptions, IFileOpenOptions, FileOperationError, FileOperationResult, FileSystemProviderErrorCode, IFileSystemProviderWithOpenReadWriteCloseCapability, IFileSystemProviderWithFileReadWriteCapability, IFileSystemProviderWithFileFolderCopyCapability, FilePermission, toFileSystemProviderErrorCode, IFileStatWithPartialMetadata, IFileStat } from '../../../platform/files/common/files.js';
+import { IFileAtomicReadOptions, IFileWriteOptions, FileSystemProviderCapabilities, IFileChange, IFileService, IStat, IWatchOptions, FileType, IFileOverwriteOptions, IFileDeleteOptions, IFileOpenOptions, FileOperationError, FileOperationResult, FileSystemProviderErrorCode, IFileSystemProviderWithOpenReadWriteCloseCapability, IFileSystemProviderWithFileReadWriteCapability, IFileSystemProviderWithFileFolderCopyCapability, FilePermission, toFileSystemProviderErrorCode, IFileStatWithPartialMetadata, IFileStat } from '../../../platform/files/common/files.js';
 import { extHostNamedCustomer, IExtHostContext } from '../../services/extensions/common/extHostCustomers.js';
 import { ExtHostContext, ExtHostFileSystemShape, IFileChangeDto, MainContext, MainThreadFileSystemShape } from '../common/extHost.protocol.js';
 import { VSBuffer } from '../../../base/common/buffer.js';
@@ -234,12 +234,16 @@ class RemoteFileSystemProvider implements IFileSystemProviderWithFileReadWriteCa
 		}
 	}
 
-	async readFile(resource: URI): Promise<Uint8Array> {
-		const buffer = await this._proxy.$readFile(this._handle, resource);
+	async readFile(resource: URI, opts?: IFileAtomicReadOptions): Promise<Uint8Array> {
+		const buffer = await this._proxy.$readFile(this._handle, resource, opts);
 		return buffer.buffer;
 	}
 
-	writeFile(resource: URI, content: Uint8Array, opts: IFileWriteOptions): Promise<void> {
+	async writeFile(resource: URI, content: Uint8Array, opts: IFileWriteOptions): Promise<void> {
+		await this.writeFileWithMetadata(resource, content, opts);
+	}
+
+	writeFileWithMetadata(resource: URI, content: Uint8Array, opts: IFileWriteOptions): Promise<IStat | undefined> {
 		return this._proxy.$writeFile(this._handle, resource, VSBuffer.wrap(content), opts);
 	}
 

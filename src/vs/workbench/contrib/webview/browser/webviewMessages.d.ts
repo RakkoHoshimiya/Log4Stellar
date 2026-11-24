@@ -41,6 +41,7 @@ export type FromWebviewMessage = {
 	'fatal-error': { message: string };
 	'no-csp-found': void;
 	'did-keydown': KeyEvent;
+	'did-user-activity': { keyEventToken: string };
 	'did-keyup': KeyEvent;
 	'did-context-menu': { clientX: number; clientY: number; context: { [key: string]: unknown } };
 	'drag-start': void;

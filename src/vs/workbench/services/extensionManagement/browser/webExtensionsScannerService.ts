@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { CachedFunction } from '../../../../base/common/cache.js';
 import { IBuiltinExtensionsScannerService, ExtensionType, IExtensionIdentifier, IExtension, IExtensionManifest, TargetPlatform, IRelaxedExtensionManifest, parseEnabledApiProposalNames } from '../../../../platform/extensions/common/extensions.js';
 import { IBrowserWorkbenchEnvironmentService } from '../../environment/browser/environmentService.js';
 import { IScannedExtension, IWebExtensionsScannerService, ScanOptions } from '../common/extensionManagement.js';
@@ -26,6 +27,7 @@ import { getErrorMessage } from '../../../../base/common/errors.js';
 import { ResourceMap } from '../../../../base/common/map.js';
 import { IExtensionManifestPropertiesService } from '../../extensions/common/extensionManifestPropertiesService.js';
 import { IExtensionResourceLoaderService, migratePlatformSpecificExtensionGalleryResourceURL } from '../../../../platform/extensionResourceLoader/common/extensionResourceLoader.js';
+import { ILanguagePackService } from '../../../../platform/languagePacks/common/languagePacks.js';
 import { Action2, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { Categories } from '../../../../platform/action/common/actionCommonCategories.js';
 import { IsWebContext } from '../../../../platform/contextkey/common/contextkeys.js';
@@ -100,12 +102,14 @@ export class WebExtensionsScannerService extends Disposable implements IWebExten
 	private readonly systemExtensionsCacheResource: URI | undefined = undefined;
 	private readonly customBuiltinExtensionsCacheResource: URI | undefined = undefined;
 	private readonly resourcesAccessQueueMap = new ResourceMap<Queue<IWebExtension[]>>();
+	private readonly bundledManifestTranslations = new CachedFunction((id: string) => this.getBundledManifestTranslations(id));
 
 	constructor(
 		@IBrowserWorkbenchEnvironmentService private readonly environmentService: IBrowserWorkbenchEnvironmentService,
 		@IBuiltinExtensionsScannerService private readonly builtinExtensionsScannerService: IBuiltinExtensionsScannerService,
 		@IFileService private readonly fileService: IFileService,
 		@ILogService private readonly logService: ILogService,
+		@ILanguagePackService private readonly languagePackService: ILanguagePackService,
 		@IExtensionGalleryService private readonly galleryService: IExtensionGalleryService,
 		@IExtensionManifestPropertiesService private readonly extensionManifestPropertiesService: IExtensionManifestPropertiesService,
 		@IExtensionResourceLoaderService private readonly extensionResourceLoaderService: IExtensionResourceLoaderService,
@@ -762,7 +766,13 @@ export class WebExtensionsScannerService extends Disposable implements IWebExten
 		if (packageNLSUri) {
 			manifest = await this.translateManifest(manifest, packageNLSUri, fallbackPackageNLS);
 		} else if (fallbackPackageNLS) {
-			manifest = await this.translateManifest(manifest, fallbackPackageNLS);
+			let bundledTranslations: ITranslations | undefined;
+			if (isBuiltin && !Language.isDefaultVariant()) {
+				bundledTranslations = await this.bundledManifestTranslations.get(webExtension.identifier.id);
+			}
+			manifest = bundledTranslations
+				? await this.translateManifest(manifest, bundledTranslations, fallbackPackageNLS)
+				: await this.translateManifest(manifest, fallbackPackageNLS);
 		}
 
 		const uuid = (<IGalleryMetadata | undefined>webExtension.metadata)?.id;
@@ -815,6 +825,21 @@ export class WebExtensionsScannerService extends Disposable implements IWebExten
 			}
 		} catch (error) { /* ignore */ }
 		return manifest;
+	}
+
+	private async getBundledManifestTranslations(id: string): Promise<ITranslations | undefined> {
+		const uri = await this.languagePackService.getBuiltInExtensionTranslationsUri(id, Language.value(), { bundledOnly: true });
+		if (!uri) {
+			return undefined;
+		}
+		try {
+			const contents = await this.extensionResourceLoaderService.readExtensionResource(uri);
+			const bundle: { contents?: { package?: ITranslations } } = JSON.parse(contents);
+			return bundle.contents?.package;
+		} catch (error) {
+			this.logService.warn('Unable to read bundled extension manifest translations', id, getErrorMessage(error));
+			return undefined;
+		}
 	}
 
 	private async getExtensionManifest(location: URI): Promise<IExtensionManifest> {

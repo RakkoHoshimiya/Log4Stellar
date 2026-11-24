@@ -1,0 +1,216 @@
+name: Log4Stellar Web
+
+# The Web package (apps/web) is a Node server, not part of the VS Code desktop build, so
+# it does not belong in pr.yml: that workflow fans out to the upstream Electron, Browser,
+# Windows and macOS jobs, which either fail to build the Web server or, worse, succeed
+# without ever running its tests. This file is the single explicit entry for the Web
+# package; the upstream workflows keep running unchanged for the editor.
+#
+# The jobs are deliberately separate rather than one job with `if:` steps:
+#   - Static and Unit need no services, so they report in about a minute and a broken
+#     commit is visible before the slow jobs start.
+#   - Integration needs a real PostgreSQL and an S3-compatible store, because the storage
+#     layer is SQL plus objects. It starts its own services and never talks to the
+#     deployment host (see apps/web/ci-workflow.mjs, which rejects any marker of it).
+#   - Browser needs Playwright and a Chromium download; keeping it apart means a flaky
+#     browser run does not hide a unit failure.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Every job installs the node the Web server actually runs on. The release marker pins
+  # a major and readWebRelease() refuses a package built on another one, so this must be
+  # the same `.nvmrc` the deployment uses.
+  NODE_OPTIONS: '--max-old-space-size=4096'
+
+jobs:
+  static:
+    name: Web / Static
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup pnpm
+        uses: ./.github/actions/setup-pnpm
+
+      - name: Setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Check every server module parses
+        run: |
+          for file in apps/web/*.mjs apps/web/*.js; do
+            node --check "$file"
+          done
+
+      - name: Verify the CI entry itself
+        run: node apps/web/verify-ci-flow.mjs --static
+
+      - name: Inventory the inherited workflows
+        run: node apps/web/verify-ci-flow.mjs --inventory
+
+      - name: Report the build resources
+        run: node apps/web/verify-ci-flow.mjs --resources
+
+  unit:
+    name: Web / Unit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup pnpm
+        uses: ./.github/actions/setup-pnpm
+
+      - name: Setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # The TAP copy is what the next step reads: it is the only place a skip reason is
+      # observable, and a gated suite that silently skipped would otherwise look green.
+      - name: Run the Web unit tests
+        run: |
+          node --test --test-reporter=tap --test-reporter-destination=web-tap.txt apps/web/*.test.mjs
+          node --test apps/web/*.test.mjs
+
+      - name: Require every skip to carry a reason
+        run: node apps/web/verify-ci-flow.mjs --tap web-tap.txt
+
+  integration:
+    name: Web / Integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # The storage layer is PostgreSQL plus an S3-compatible object store, so an in-process
+    # fake would test the fake. The service credentials below are local to this job and
+    # have nothing in common with the deployment.
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: log4stellar_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      minio:
+        image: minio/minio:latest
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "mc ready local || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+        command: server /data
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup pnpm
+        uses: ./.github/actions/setup-pnpm
+
+      - name: Setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Create the isolated bucket
+        run: |
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /tmp/mc
+          chmod +x /tmp/mc
+          /tmp/mc alias set local http://127.0.0.1:9000 minioadmin minioadmin
+          /tmp/mc mb --ignore-existing local/log4stellar-ci
+
+      # Writes the storage configuration to a temporary file and checks that it is
+      # isolated. The integration suite creates workspaces, uploads objects and deletes
+      # them; on the deployment host that would be data loss.
+      - name: Prepare the isolated storage configuration
+        run: node apps/web/verify-ci-flow.mjs --isolated-storage >> "$GITHUB_ENV"
+        env:
+          LOG4STELLAR_IT_S3_ENDPOINT: http://127.0.0.1:9000
+          LOG4STELLAR_IT_S3_BUCKET: log4stellar-ci
+          LOG4STELLAR_IT_PG_HOST: 127.0.0.1
+          LOG4STELLAR_IT_PG_DATABASE: log4stellar_ci
+
+      # --test-concurrency=1 is not a preference: the test role is limited to 10
+      # connections and each test file opens a pool of up to 4, so the default
+      # parallelism produces random "too many connections for role" failures.
+      - name: Run the Web integration tests
+        run: LOG4STELLAR_IT=1 node --test --test-concurrency=1 apps/web/*.test.mjs
+
+  browser:
+    name: Web / Browser
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup pnpm
+        uses: ./.github/actions/setup-pnpm
+
+      - name: Setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Install Playwright
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run the browser tests
+        run: LOG4STELLAR_BROWSER_IT=1 node --test apps/web/*.browser.test.mjs
+
+  # A single check the branch protection rule can require. Without it a job that is
+  # skipped, cancelled or never created reports as "not required" instead of as failed.
+  gate:
+    name: Web / Gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs: [static, unit, integration, browser]
+    if: always()
+    steps:
+      - name: Report the job results
+        run: |
+          echo "static=${{ needs.static.result }}"
+          echo "unit=${{ needs.unit.result }}"
+          echo "integration=${{ needs.integration.result }}"
+          echo "browser=${{ needs.browser.result }}"
+          for result in "${{ needs.static.result }}" "${{ needs.unit.result }}" "${{ needs.integration.result }}" "${{ needs.browser.result }}"; do
+            if [ "$result" != "success" ]; then
+              echo "::error::The Web pipeline is blocked: a required job finished as $result."
+              exit 1
+            fi
+          done

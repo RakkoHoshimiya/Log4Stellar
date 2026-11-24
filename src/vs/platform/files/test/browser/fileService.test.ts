@@ -13,7 +13,7 @@ import { isEqual } from '../../../../base/common/resources.js';
 import { consumeStream, newWriteableStream, ReadableStreamEvents } from '../../../../base/common/stream.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../base/test/common/utils.js';
-import { createFileSystemProviderError, FileChangesEvent, FileChangeType, FileOperationError, FileOperationResult, FileSystemProviderCapabilities, FileSystemProviderErrorCode, FileType, IFileAtomicDeleteOptions, IFileAtomicOptions, IFileAtomicReadOptions, IFileAtomicWriteOptions, IFileChange, IFileOpenOptions, IFileReadStreamOptions, IFileSystemProviderCapabilitiesChangeEvent, IFileSystemProviderRegistrationEvent, IFileSystemProviderWithFileAtomicDeleteCapability, IFileSystemProviderWithFileAtomicReadCapability, IFileSystemProviderWithFileAtomicWriteCapability, IStat, isFileSystemWatcher } from '../../common/files.js';
+import { createFileSystemProviderError, FileChangesEvent, FileChangeType, FileOperationError, FileOperationResult, FileSystemProviderCapabilities, FileSystemProviderErrorCode, FileType, IFileAtomicDeleteOptions, IFileAtomicOptions, IFileAtomicReadOptions, IFileAtomicWriteOptions, IFileChange, IFileOpenOptions, IFileReadStreamOptions, IFileWriteOptions, IFileSystemProviderCapabilitiesChangeEvent, IFileSystemProviderRegistrationEvent, IFileSystemProviderWithFileAtomicDeleteCapability, IFileSystemProviderWithFileAtomicReadCapability, IFileSystemProviderWithFileAtomicWriteCapability, IStat, isFileSystemWatcher } from '../../common/files.js';
 import { FileService } from '../../common/fileService.js';
 import { InMemoryFileSystemProvider } from '../../common/inMemoryFilesystemProvider.js';
 import { NullFileSystemProvider } from '../common/nullFileSystemProvider.js';
@@ -38,6 +38,52 @@ class AtomicRenameFileSystemProvider extends InMemoryFileSystemProvider {
 suite('File Service', () => {
 
 	const disposables = ensureNoDisposablesAreLeakedInTestSuite();
+
+	test('uses the exact server revision for same-size changes and conditional reads and writes', async () => {
+		const service = disposables.add(new FileService(new NullLogService()));
+		const provider = disposables.add(new class extends InMemoryFileSystemProvider {
+			private revision = 0;
+			changeAfterWrite = false;
+
+			override get capabilities(): FileSystemProviderCapabilities {
+				return (super.capabilities & ~FileSystemProviderCapabilities.FileOpenReadWriteClose) | FileSystemProviderCapabilities.FileRevision;
+			}
+
+			override async stat(resource: URI): Promise<IStat> {
+				return { ...await super.stat(resource), mtime: 1, etag: String(this.revision) };
+			}
+
+			override async readFile(resource: URI, options?: IFileAtomicReadOptions): Promise<Uint8Array> {
+				assert.strictEqual(options?.expectedEtag, String(this.revision));
+				return super.readFile(resource);
+			}
+
+			async writeFileWithMetadata(resource: URI, content: Uint8Array, options: IFileWriteOptions): Promise<IStat> {
+				assert.strictEqual(options.expectedEtag, this.revision === 0 ? '' : String(this.revision));
+				await super.writeFile(resource, content, options);
+				this.revision++;
+				const saved = await this.stat(resource);
+				if (this.changeAfterWrite) {
+					await super.writeFile(resource, VSBuffer.fromString('later').buffer, options);
+					this.revision++;
+				}
+				return saved;
+			}
+		}());
+		disposables.add(service.registerProvider('test', provider));
+		const note = URI.parse('test:/note.md');
+		await service.writeFile(note, VSBuffer.fromString('first'));
+		const old = await service.readFile(note);
+		provider.changeAfterWrite = true;
+		const saved = await service.writeFile(note, VSBuffer.fromString('write'), old);
+		const newest = await service.readFile(note);
+		assert.strictEqual(saved.etag, '2');
+		assert.strictEqual(newest.etag, '3');
+		assert.strictEqual(newest.value.toString(), 'later');
+		await assert.rejects(service.writeFile(note, VSBuffer.fromString('draft'), saved),
+			(error: FileOperationError) => error.fileOperationResult === FileOperationResult.FILE_MODIFIED_SINCE);
+		assert.strictEqual((await service.readFile(note)).value.toString(), 'later');
+	});
 
 	suite('atomic move', () => {
 		test('rejects providers without atomic rename support before changing either file', async () => {

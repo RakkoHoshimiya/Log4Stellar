@@ -12,6 +12,7 @@ import { isUndefinedOrNull } from '../../../../base/common/types.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ILanguageService } from '../../../../editor/common/languages/language.js';
 import { localize } from '../../../../nls.js';
+import { AUTOMATIC_DISPLAY_LANGUAGE, DISPLAY_LANGUAGE_SETTING_ID } from '../../../services/localization/common/locale.js';
 import { ConfigurationTarget, getLanguageTagSettingPlainKey, IConfigurationValue } from '../../../../platform/configuration/common/configuration.js';
 import { ConfigurationDefaultValueSource, ConfigurationScope, EditPresentationTypes, Extensions, IConfigurationRegistry } from '../../../../platform/configuration/common/configurationRegistry.js';
 import { IProductService } from '../../../../platform/product/common/productService.js';
@@ -292,6 +293,11 @@ export class SettingsTreeSettingElement extends SettingsTreeElement {
 	}
 
 	inspectSelf() {
+		if (this.setting.key === DISPLAY_LANGUAGE_SETTING_ID) {
+			this.value = this.setting.value;
+			this.defaultValue = AUTOMATIC_DISPLAY_LANGUAGE;
+			return;
+		}
 		const targetToInspect = this.getTargetToInspect(this.setting);
 		const inspectResult = inspectSetting(this.setting.key, targetToInspect, this.languageFilter, this.configurationService);
 		this.update(inspectResult, this.isWorkspaceTrusted);
@@ -803,8 +809,59 @@ export function sanitizeId(id: string): string {
 	return id.replace(/[\.\/]/g, '_');
 }
 
+const settingLabels = new Map([
+	['editor.fontSize', localize('setting.label.editor.fontSize', "Font Size")],
+	['editor.formatOnSave', localize('setting.label.editor.formatOnSave', "Format On Save")],
+	['files.autoSave', localize('setting.label.files.autoSave', "Auto Save")],
+	['GitHub.copilot-chat.manageExtension', localize('setting.label.GitHub.copilot-chat.manageExtension', "Manage Extension")],
+	['editor.defaultFormatter', localize('setting.label.editor.defaultFormatter', "Default Formatter")],
+	['editor.fontFamily', localize('setting.label.editor.fontFamily', "Font Family")],
+	['editor.wordWrap', localize('setting.label.editor.wordWrap', "Word Wrap")],
+	['chat.agent.maxRequests', localize('setting.label.chat.agent.maxRequests', "Max Requests")],
+	['files.exclude', localize('setting.label.files.exclude', "Exclude")],
+	['workbench.colorTheme', localize('setting.label.workbench.colorTheme', "Color Theme")],
+	['editor.tabSize', localize('setting.label.editor.tabSize', "Tab Size")],
+	['editor.mouseWheelZoom', localize('setting.label.editor.mouseWheelZoom', "Mouse Wheel Zoom")],
+	['editor.formatOnPaste', localize('setting.label.editor.formatOnPaste', "Format On Paste")],
+	['keyboard.layout', localize('setting.label.keyboard.layout', "Layout")],
+	['markdown.editor.highlightActiveBlock', localize('setting.label.markdown.editor.highlightActiveBlock', "Highlight Active Block")],
+	['markdown.editor.initialMode', localize('setting.label.markdown.editor.initialMode', "Initial Mode")],
+	['markdown.editor.renderWhitespace', localize('setting.label.markdown.editor.renderWhitespace', "Render Whitespace")],
+	['markdown.editor.quickSuggestions', localize('setting.label.markdown.editor.quickSuggestions', "Quick Suggestions")],
+	['markdown.editor.drop.enabled', localize('setting.label.markdown.editor.drop.enabled', "Enabled")],
+	['markdown.editor.drop.copyIntoWorkspace', localize('setting.label.markdown.editor.drop.copyIntoWorkspace', "Copy Into Workspace")],
+	['markdown.editor.filePaste.enabled', localize('setting.label.markdown.editor.filePaste.enabled', "Enabled")],
+	['markdown.editor.filePaste.copyIntoWorkspace', localize('setting.label.markdown.editor.filePaste.copyIntoWorkspace', "Copy Into Workspace")],
+	['markdown.editor.pasteUrlAsFormattedLink.enabled', localize('setting.label.markdown.editor.pasteUrlAsFormattedLink.enabled', "Enabled")],
+	['markdown.editor.updateLinksOnPaste.enabled', localize('setting.label.markdown.editor.updateLinksOnPaste.enabled', "Enabled")],
+	['markdown.preview.breaks', localize('setting.label.markdown.preview.breaks', "Breaks")],
+	['markdown.preview.fontFamily', localize('setting.label.markdown.preview.fontFamily', "Font Family")],
+	['markdown.preview.fontSize', localize('setting.label.markdown.preview.fontSize', "Font Size")],
+	['markdown.preview.lineHeight', localize('setting.label.markdown.preview.lineHeight', "Line Height")],
+	['markdown.preview.linkify', localize('setting.label.markdown.preview.linkify', "Linkify")],
+	['markdown.preview.typographer', localize('setting.label.markdown.preview.typographer', "Typographer")],
+	['markdown.preview.openMarkdownLinks', localize('setting.label.markdown.preview.openMarkdownLinks', "Open Markdown Links")],
+	['markdown.styles', localize('setting.label.markdown.styles', "Styles")],
+]);
+
+const settingCategories = new Map([
+	['editor', localize('setting.category.editor', "Editor")],
+	['files', localize('setting.category.files', "Files")],
+	['workbench', localize('setting.category.workbench', "Workbench")],
+	['keyboard', localize('setting.category.keyboard', "Keyboard")],
+	['chat.agent', localize('setting.category.chat.agent', "Chat › Agent")],
+	['github.copilot-chat', localize('setting.category.github.copilot-chat', "GitHub › Copilot Chat")],
+	['markdown', localize('setting.category.markdown', "Markdown")],
+	['markdown.editor', localize('setting.category.markdown.editor', "Markdown › Editor")],
+	['markdown.editor.drop', localize('setting.category.markdown.editor.drop', "Markdown › Editor › Drop")],
+	['markdown.editor.filepaste', localize('setting.category.markdown.editor.filepaste', "Markdown › Editor › File Paste")],
+	['markdown.editor.pasteurlasformattedlink', localize('setting.category.markdown.editor.pasteurlasformattedlink', "Markdown › Editor › Paste URL As Formatted Link")],
+	['markdown.editor.updatelinksonpaste', localize('setting.category.markdown.editor.updatelinksonpaste', "Markdown › Editor › Update Links On Paste")],
+	['markdown.preview', localize('setting.category.markdown.preview', "Markdown › Preview")],
+]);
+
 export function settingKeyToDisplayFormat(key: string, groupId: string = '', isLanguageTagSetting: boolean = false): { category: string; label: string } {
-	let displayLabel: string | undefined;
+	let displayLabel = settingLabels.get(key);
 	switch (key) {
 		case AgentSandboxSettingId.AgentSandboxAllowNetwork:
 			displayLabel = localize('agentSandbox.allowNetwork.label', "Allow Outbound Connections");
@@ -840,7 +897,7 @@ export function settingKeyToDisplayFormat(key: string, groupId: string = '', isL
 
 	groupId = groupId.replace(/\//g, '.');
 	category = trimCategoryForGroup(category, groupId);
-	category = wordifyKey(category);
+	category = settingCategories.get(category.toLowerCase()) ?? wordifyKey(category);
 
 	if (isLanguageTagSetting) {
 		key = getLanguageTagSettingPlainKey(key);

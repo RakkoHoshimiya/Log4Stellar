@@ -4,13 +4,32 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { CancellationTokenSource } from '../../../base/common/cancellation.js';
+import { Lazy } from '../../../base/common/lazy.js';
+import { FileAccess } from '../../../base/common/network.js';
+import { LANGUAGE_DEFAULT } from '../../../base/common/platform.js';
 import { URI } from '../../../base/common/uri.js';
 import { IExtensionGalleryService } from '../../extensionManagement/common/extensionManagement.js';
 import { IExtensionResourceLoaderService } from '../../extensionResourceLoader/common/extensionResourceLoader.js';
 import { ILanguagePackItem, LanguagePackBaseService } from '../common/languagePacks.js';
 import { ILogService } from '../../log/common/log.js';
 
+interface IBundledLanguagePack {
+	readonly id: string;
+	readonly label: string;
+	readonly extensions: readonly string[];
+}
+
 export class WebLanguagePacksService extends LanguagePackBaseService {
+	private readonly bundledLanguagePacks = new Lazy(async (): Promise<readonly IBundledLanguagePack[]> => {
+		try {
+			const response = await fetch(FileAccess.asBrowserUri('nls.locales.json').toString());
+			return response.ok ? await response.json() : [];
+		} catch (error) {
+			this.logService.trace('Unable to read bundled language packs', error);
+			return [];
+		}
+	});
+
 	constructor(
 		@IExtensionResourceLoaderService private readonly extensionResourceLoaderService: IExtensionResourceLoaderService,
 		@IExtensionGalleryService extensionGalleryService: IExtensionGalleryService,
@@ -19,7 +38,14 @@ export class WebLanguagePacksService extends LanguagePackBaseService {
 		super(extensionGalleryService);
 	}
 
-	async getBuiltInExtensionTranslationsUri(id: string, language: string): Promise<URI | undefined> {
+	async getBuiltInExtensionTranslationsUri(id: string, language: string, options?: { bundledOnly?: boolean }): Promise<URI | undefined> {
+		const bundledLanguage = (await this.bundledLanguagePacks.value).find(pack => pack.id === language);
+		if (bundledLanguage?.extensions.includes(id)) {
+			return FileAccess.asBrowserUri(`nls/${language}/${id}.i18n.json`);
+		}
+		if (options?.bundledOnly || !this.extensionGalleryService.isEnabled()) {
+			return undefined;
+		}
 
 		const queryTimeout = new CancellationTokenSource();
 		setTimeout(() => queryTimeout.cancel(), 1000);
@@ -70,8 +96,11 @@ export class WebLanguagePacksService extends LanguagePackBaseService {
 		return URI.joinPath(uri, translation.path);
 	}
 
-	// Web doesn't have a concept of language packs, so we just return an empty array
-	getInstalledLanguages(): Promise<ILanguagePackItem[]> {
-		return Promise.resolve([]);
+	async getInstalledLanguages(): Promise<ILanguagePackItem[]> {
+		const bundled = await this.bundledLanguagePacks.value;
+		return [
+			this.createQuickPickItem(LANGUAGE_DEFAULT, 'English'),
+			...bundled.map(pack => this.createQuickPickItem(pack.id, pack.label)),
+		];
 	}
 }

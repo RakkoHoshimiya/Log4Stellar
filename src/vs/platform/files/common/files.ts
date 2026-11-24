@@ -290,6 +290,7 @@ export interface IFileUnlockOptions {
 }
 
 export interface IFileAtomicReadOptions {
+	readonly expectedEtag?: string;
 
 	/**
 	 * The optional `atomic` flag can be used to make sure
@@ -377,6 +378,7 @@ export interface IFileReadStreamOptions {
 }
 
 export interface IFileWriteOptions extends IFileOverwriteOptions, IFileUnlockOptions, IFileAtomicWriteOptions {
+	readonly expectedEtag?: string;
 
 	/**
 	 * Set to `true` to create a file when it does not exist. Will
@@ -420,6 +422,7 @@ export interface IFileOpenForWriteOptions extends IFileUnlockOptions {
 }
 
 export interface IFileDeleteOptions {
+	readonly trashId?: string;
 
 	/**
 	 * Set to `true` to recursively delete any children of the file. This
@@ -497,6 +500,8 @@ export enum FilePermission {
 }
 
 export interface IStat {
+	/** The provider revision of these bytes, when available. */
+	readonly etag?: string;
 
 	/**
 	 * The file type.
@@ -602,6 +607,12 @@ export const enum FileSystemProviderCapabilities {
 	 * No capabilities.
 	 */
 	None = 0,
+
+	/** Provider supplies version identifiers and supports conditional reads and writes. */
+	FileRevision = 1 << 21,
+
+	/** Provider can restore a deleted item using its recycle bin ID. */
+	FileTrashUndo = 1 << 22,
 
 	/**
 	 * Provider supports unbuffered read/write.
@@ -713,6 +724,9 @@ export interface IFileSystemProvider {
 }
 
 export interface IFileSystemProviderWithFileReadWriteCapability extends IFileSystemProvider {
+	/** For versioned providers, returns the exact revision created by the write. */
+	writeFileWithMetadata?(resource: URI, content: Uint8Array, opts: IFileWriteOptions): Promise<IStat | undefined>;
+
 
 	/**
 	 * @param opts are only passed when the provider has the `FileAtomicRead` capability.
@@ -848,6 +862,7 @@ export enum FileSystemProviderErrorCode {
 	FileExceedsStorageQuota = 'EntryExceedsStorageQuota',
 	FileTooLarge = 'EntryTooLarge',
 	FileWriteLocked = 'EntryWriteLocked',
+	FileChanged = 'FileChanged',
 	NoPermissions = 'NoPermissions',
 	Unavailable = 'Unavailable',
 	Unknown = 'Unknown'
@@ -915,6 +930,7 @@ export function toFileSystemProviderErrorCode(error: Error | undefined | null): 
 		case FileSystemProviderErrorCode.FileNotADirectory: return FileSystemProviderErrorCode.FileNotADirectory;
 		case FileSystemProviderErrorCode.FileNotFound: return FileSystemProviderErrorCode.FileNotFound;
 		case FileSystemProviderErrorCode.FileTooLarge: return FileSystemProviderErrorCode.FileTooLarge;
+		case FileSystemProviderErrorCode.FileChanged: return FileSystemProviderErrorCode.FileChanged;
 		case FileSystemProviderErrorCode.FileWriteLocked: return FileSystemProviderErrorCode.FileWriteLocked;
 		case FileSystemProviderErrorCode.NoPermissions: return FileSystemProviderErrorCode.NoPermissions;
 		case FileSystemProviderErrorCode.Unavailable: return FileSystemProviderErrorCode.Unavailable;
@@ -938,6 +954,8 @@ export function toFileOperationResult(error: Error): FileOperationResult {
 			return FileOperationResult.FILE_IS_DIRECTORY;
 		case FileSystemProviderErrorCode.FileNotADirectory:
 			return FileOperationResult.FILE_NOT_DIRECTORY;
+		case FileSystemProviderErrorCode.FileChanged:
+			return FileOperationResult.FILE_MODIFIED_SINCE;
 		case FileSystemProviderErrorCode.FileWriteLocked:
 			return FileOperationResult.FILE_WRITE_LOCKED;
 		case FileSystemProviderErrorCode.NoPermissions:
@@ -1416,6 +1434,8 @@ export interface IReadFileOptions extends IBaseReadFileOptions {
 }
 
 export interface IWriteFileOptions {
+	/** The caller explicitly accepts replacing content without its original provider revision. */
+	readonly allowOverwriteWithoutVersion?: boolean;
 
 	/**
 	 * The last known modification time of the file. This can be used to prevent dirty writes.

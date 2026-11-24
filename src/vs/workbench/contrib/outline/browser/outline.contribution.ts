@@ -4,7 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { localize, localize2 } from '../../../../nls.js';
-import { IViewsRegistry, Extensions as ViewExtensions } from '../../../common/views.js';
+import { IViewsRegistry, IViewContainersRegistry, ViewContainerLocation, Extensions as ViewExtensions } from '../../../common/views.js';
+import { ViewPaneContainer } from '../../../browser/parts/views/viewPaneContainer.js';
 import { OutlinePane } from './outlinePane.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { IConfigurationRegistry, Extensions as ConfigurationExtensions, ConfigurationScope } from '../../../../platform/configuration/common/configurationRegistry.js';
@@ -23,9 +24,11 @@ import './outlineActions.js';
 
 const outlineViewIcon = registerIcon('outline-view-icon', Codicon.symbolClass, localize('outlineViewIcon', 'View icon of the outline view.'));
 
+const outlineTitle = localize2('name', "Outline");
+
 Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViews([{
 	id: IOutlinePane.Id,
-	name: localize2('name', "Outline"),
+	name: outlineTitle,
 	containerIcon: outlineViewIcon,
 	ctorDescriptor: new SyncDescriptor(OutlinePane),
 	canToggleVisibility: true,
@@ -36,6 +39,16 @@ Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry).registerViews([{
 	weight: 30,
 	focusCommand: { id: 'outline.focus' }
 }], VIEW_CONTAINER);
+
+const markdownOutlineContainerId = 'workbench.view.extension.markdownOutline';
+Registry.as<IViewContainersRegistry>(ViewExtensions.ViewContainersRegistry).registerViewContainer({
+	id: markdownOutlineContainerId,
+	title: outlineTitle,
+	icon: Codicon.listTree,
+	ctorDescriptor: new SyncDescriptor(ViewPaneContainer, [markdownOutlineContainerId, { mergeViewWithContainerWhenSingleView: true }]),
+	storageId: markdownOutlineContainerId,
+	order: 0,
+}, ViewContainerLocation.AuxiliaryBar, { isDefault: true });
 
 // --- configurations
 

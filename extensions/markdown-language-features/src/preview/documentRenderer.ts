@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { markdownLinkSource } from '../util/historyResource';
 import * as vscode from 'vscode';
 import * as uri from 'vscode-uri';
 import { ILogger } from '../logging';
@@ -81,10 +82,10 @@ export class MdDocumentRenderer {
 		diffScrollSync: DiffScrollSyncData | undefined,
 		token: vscode.CancellationToken
 	): Promise<MarkdownContentProviderOutput> {
-		const sourceUri = markdownDocument.uri;
+		const sourceUri = markdownLinkSource(markdownDocument.uri);
 		const config = previewConfigurations.loadAndCacheConfiguration(sourceUri);
 		const initialData = {
-			source: sourceUri.toString(),
+			source: markdownDocument.uri.toString(),
 			fragment: state?.fragment || markdownDocument.uri.fragment || undefined,
 			line: initialLine,
 			selectedLine,
@@ -94,7 +95,7 @@ export class MdDocumentRenderer {
 			scrollEditorWithPreview: config.scrollEditorWithPreview,
 			doubleClickToSwitchToEditor: config.doubleClickToSwitchToEditor,
 			disableSecurityWarnings: this.#cspArbiter.shouldDisableSecurityWarnings(),
-			webviewResourceRoot: resourceProvider.asWebviewUri(markdownDocument.uri).toString(),
+			webviewResourceRoot: resourceProvider.asWebviewUri(sourceUri).toString(),
 		};
 
 		this.#logger.trace('DocumentRenderer', `provideTextDocumentContent - ${markdownDocument.uri}`, initialData);
@@ -120,7 +121,7 @@ export class MdDocumentRenderer {
 					data-initial-md-content="${escapeAttribute(body.html)}">
 				<script src="${this.#extensionResourcePath(resourceProvider, 'pre.js')}" nonce="${nonce}"></script>
 				${this.#getStyles(resourceProvider, sourceUri, config, imageInfo)}
-				<base href="${resourceProvider.asWebviewUri(markdownDocument.uri)}">
+				<base href="${resourceProvider.asWebviewUri(sourceUri)}">
 			</head>
 			<body class="vscode-body ${config.scrollBeyondLastLine ? 'scrollBeyondLastLine' : ''} ${config.wordWrap ? 'wordWrap' : ''} ${config.markEditorSelection ? 'showEditorSelection' : ''}">
 				${this.#getScripts(resourceProvider, nonce)}

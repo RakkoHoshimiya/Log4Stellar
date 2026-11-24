@@ -85,9 +85,23 @@ class NativeLocaleService implements ILocaleService {
 		return true;
 	}
 
+	async getLocalePreference(): Promise<string | undefined> {
+		try {
+			const content = await this.textFileService.read(this.environmentService.argvResource, { encoding: 'utf8' });
+			const argv = parse(content.value) as { readonly locale?: unknown } | undefined;
+			const locale = argv?.locale;
+			return typeof locale === 'string' && locale ? locale : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
 	async setLocale(languagePackItem: ILanguagePackItem, skipDialog = false): Promise<void> {
 		const locale = languagePackItem.id;
-		if (locale === Language.value() || (!locale && Language.isDefaultVariant())) {
+		if (locale && locale === Language.value()) {
+			if (!await this.getLocalePreference()) {
+				await this.writeLocaleValue(locale);
+			}
 			return;
 		}
 		const installedLanguages = await this.languagePackService.getInstalledLanguages();
@@ -121,8 +135,9 @@ class NativeLocaleService implements ILocaleService {
 			if (!skipDialog && !await this.showRestartDialog(languagePackItem.label)) {
 				return;
 			}
-			await this.writeLocaleValue(locale);
-			await this.hostService.restart();
+			if (await this.writeLocaleValue(locale)) {
+				await this.hostService.restart();
+			}
 		} catch (err) {
 			this.notificationService.error(err);
 		}
@@ -130,9 +145,10 @@ class NativeLocaleService implements ILocaleService {
 
 	async clearLocalePreference(): Promise<void> {
 		try {
-			await this.writeLocaleValue(undefined);
-			if (!Language.isDefaultVariant()) {
-				await this.showRestartDialog('English');
+			if (await this.getLocalePreference()
+				&& await this.showRestartDialog(localize('systemDisplayLanguage', "System Language"))
+				&& await this.writeLocaleValue(undefined)) {
+				await this.hostService.restart();
 			}
 		} catch (err) {
 			this.notificationService.error(err);

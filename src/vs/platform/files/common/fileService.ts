@@ -261,7 +261,7 @@ export class FileService extends Disposable implements IFileService {
 			readonly: Boolean((stat.permissions ?? 0) & FilePermission.Readonly) || Boolean(provider.capabilities & FileSystemProviderCapabilities.Readonly),
 			locked: Boolean((stat.permissions ?? 0) & FilePermission.Locked),
 			executable: Boolean((stat.permissions ?? 0) & FilePermission.Executable),
-			etag: etag({ mtime: stat.mtime, size: stat.size }),
+			etag: stat.etag ?? etag({ mtime: stat.mtime, size: stat.size }),
 			children: undefined
 		};
 
@@ -392,10 +392,13 @@ export class FileService extends Disposable implements IFileService {
 			}
 		}
 
+		let writtenStat: IStat | undefined;
 		try {
 
 			// validate write (this may already return a peeked-at buffer)
 			let { stat, buffer: bufferOrReadableOrStreamOrBufferedStream } = await this.validateWriteFile(provider, resource, bufferOrReadableOrStream, writeFileOptions);
+			const serverVersioned = !!(provider.capabilities & FileSystemProviderCapabilities.FileRevision);
+			const expectedEtag = serverVersioned ? stat?.etag ?? '' : undefined;
 
 			// mkdir recursively as needed
 			if (!stat) {
@@ -416,7 +419,7 @@ export class FileService extends Disposable implements IFileService {
 				(hasReadWriteCapability(provider) && bufferOrReadableOrStreamOrBufferedStream instanceof VSBuffer) ||		// data is a full buffer already
 				(hasReadWriteCapability(provider) && hasFileAtomicWriteCapability(provider) && writeFileOptions?.atomic)	// atomic write forces unbuffered write if the provider supports it
 			) {
-				await this.doWriteUnbuffered(provider, resource, writeFileOptions, bufferOrReadableOrStreamOrBufferedStream);
+				writtenStat = await this.doWriteUnbuffered(provider, resource, writeFileOptions, bufferOrReadableOrStreamOrBufferedStream, expectedEtag);
 			}
 
 			// write file: buffered
@@ -430,7 +433,9 @@ export class FileService extends Disposable implements IFileService {
 			throw new FileOperationError(localize('err.write', "Unable to write file '{0}' ({1})", this.resourceForError(resource), ensureFileSystemProviderError(error).toString()), toFileOperationResult(error), writeFileOptions);
 		}
 
-		return this.resolve(resource, { resolveMetadata: true });
+		return writtenStat
+			? this.toFileStat(provider, resource, writtenStat, undefined, true, () => false)
+			: this.resolve(resource, { resolveMetadata: true });
 	}
 
 
@@ -488,6 +493,14 @@ export class FileService extends Disposable implements IFileService {
 		try {
 			stat = await provider.stat(resource);
 		} catch (error) {
+			if (provider.capabilities & FileSystemProviderCapabilities.FileRevision) {
+				if (toFileSystemProviderErrorCode(error) !== FileSystemProviderErrorCode.FileNotFound) {
+					throw error;
+				}
+				if (options?.etag && !options.allowOverwriteWithoutVersion) {
+					throw new FileOperationError(localize('providerFileChangedSince', "File Modified Since"), FileOperationResult.FILE_MODIFIED_SINCE, options);
+				}
+			}
 			return Object.create(null); // file might not exist
 		}
 
@@ -498,6 +511,13 @@ export class FileService extends Disposable implements IFileService {
 
 		// File cannot be readonly
 		this.throwIfFileIsReadonly(resource, stat);
+
+		if (stat.etag !== undefined) {
+			if (options?.etag !== undefined && options.etag !== stat.etag && !options.allowOverwriteWithoutVersion) {
+				throw new FileOperationError(localize('providerFileChangedSince', "File Modified Since"), FileOperationResult.FILE_MODIFIED_SINCE, options);
+			}
+			return { stat, buffer: undefined };
+		}
 
 		// Dirty write prevention: if the file on disk has been changed and does not match our expected
 		// mtime and etag, we bail out to prevent dirty writing.
@@ -616,6 +636,8 @@ export class FileService extends Disposable implements IFileService {
 			// due to the likelihood of hitting a NOT_MODIFIED_SINCE result.
 			// otherwise, we let it run in parallel to the file reading for
 			// optimal startup performance.
+			const serverVersioned = !!(provider.capabilities & FileSystemProviderCapabilities.FileRevision);
+			const etag = serverVersioned ? (await statPromise).etag : undefined;
 			if (typeof readFileOptions?.etag === 'string' && readFileOptions.etag !== ETAG_DISABLED) {
 				await statPromise;
 			}
@@ -626,7 +648,7 @@ export class FileService extends Disposable implements IFileService {
 				!(hasOpenReadWriteCloseCapability(provider) || hasFileReadStreamCapability(provider)) ||	// provider has no buffered capability
 				(hasReadWriteCapability(provider) && readFileOptions?.preferUnbuffered)								// unbuffered read is preferred
 			) {
-				fileStream = this.readFileUnbuffered(provider, resource, cancellableSource.token, readFileOptions);
+				fileStream = this.readFileUnbuffered(provider, resource, cancellableSource.token, readFileOptions, etag);
 			}
 
 			// read streamed (always prefer over primitive buffered read)
@@ -699,7 +721,7 @@ export class FileService extends Disposable implements IFileService {
 		return stream;
 	}
 
-	private readFileUnbuffered(provider: IFileSystemProviderWithFileReadWriteCapability | IFileSystemProviderWithFileAtomicReadCapability, resource: URI, token: CancellationToken, options?: IReadFileOptions & IReadFileStreamOptions): VSBufferReadableStream {
+	private readFileUnbuffered(provider: IFileSystemProviderWithFileReadWriteCapability | IFileSystemProviderWithFileAtomicReadCapability, resource: URI, token: CancellationToken, options?: IReadFileOptions & IReadFileStreamOptions, expectedEtag?: string): VSBufferReadableStream {
 		const stream = newWriteableStream<VSBuffer>(data => VSBuffer.concat(data));
 
 		// Read the file into the stream async but do not wait for
@@ -710,7 +732,7 @@ export class FileService extends Disposable implements IFileService {
 				if (options?.atomic && hasFileAtomicReadCapability(provider)) {
 					buffer = await provider.readFile(resource, { atomic: true }, token);
 				} else {
-					buffer = await provider.readFile(resource, undefined, token);
+					buffer = await provider.readFile(resource, expectedEtag === undefined ? undefined : { atomic: false, expectedEtag }, token);
 				}
 
 				// respect position option
@@ -1138,7 +1160,7 @@ export class FileService extends Disposable implements IFileService {
 		const atomic = deleteFileOptions?.atomic ?? false;
 
 		// Delete through provider
-		await provider.delete(resource, { recursive, useTrash, atomic });
+		await provider.delete(resource, { recursive, useTrash, atomic, trashId: deleteFileOptions?.trashId });
 
 		// Events
 		this._onDidRunOperation.fire(new FileOperationEvent(resource, FileOperation.DELETE));
@@ -1415,11 +1437,15 @@ export class FileService extends Disposable implements IFileService {
 		}
 	}
 
-	private async doWriteUnbuffered(provider: IFileSystemProviderWithFileReadWriteCapability, resource: URI, options: IWriteFileOptions | undefined, bufferOrReadableOrStreamOrBufferedStream: VSBuffer | VSBufferReadable | VSBufferReadableStream | VSBufferReadableBufferedStream): Promise<void> {
-		return this.writeQueue.queueFor(resource, () => this.doWriteUnbufferedQueued(provider, resource, options, bufferOrReadableOrStreamOrBufferedStream), this.getExtUri(provider).providerExtUri);
+	private async doWriteUnbuffered(provider: IFileSystemProviderWithFileReadWriteCapability, resource: URI, options: IWriteFileOptions | undefined, bufferOrReadableOrStreamOrBufferedStream: VSBuffer | VSBufferReadable | VSBufferReadableStream | VSBufferReadableBufferedStream, expectedEtag?: string): Promise<IStat | undefined> {
+		let stat: IStat | undefined;
+		await this.writeQueue.queueFor(resource, async () => {
+			stat = await this.doWriteUnbufferedQueued(provider, resource, options, bufferOrReadableOrStreamOrBufferedStream, expectedEtag);
+		}, this.getExtUri(provider).providerExtUri);
+		return stat;
 	}
 
-	private async doWriteUnbufferedQueued(provider: IFileSystemProviderWithFileReadWriteCapability, resource: URI, options: IWriteFileOptions | undefined, bufferOrReadableOrStreamOrBufferedStream: VSBuffer | VSBufferReadable | VSBufferReadableStream | VSBufferReadableBufferedStream): Promise<void> {
+	private async doWriteUnbufferedQueued(provider: IFileSystemProviderWithFileReadWriteCapability, resource: URI, options: IWriteFileOptions | undefined, bufferOrReadableOrStreamOrBufferedStream: VSBuffer | VSBufferReadable | VSBufferReadableStream | VSBufferReadableBufferedStream, expectedEtag?: string): Promise<IStat | undefined> {
 		let buffer: VSBuffer;
 		if (bufferOrReadableOrStreamOrBufferedStream instanceof VSBuffer) {
 			buffer = bufferOrReadableOrStreamOrBufferedStream;
@@ -1432,7 +1458,12 @@ export class FileService extends Disposable implements IFileService {
 		}
 
 		// Write through the provider
-		await provider.writeFile(resource, buffer.buffer, { create: true, overwrite: true, unlock: options?.unlock ?? false, atomic: options?.atomic ?? false, append: options?.append ?? false });
+		const writeOptions = { create: true, overwrite: true, unlock: options?.unlock ?? false, atomic: options?.atomic ?? false, append: options?.append ?? false, expectedEtag };
+		if (expectedEtag !== undefined && provider.writeFileWithMetadata) {
+			return provider.writeFileWithMetadata(resource, buffer.buffer, writeOptions);
+		}
+		await provider.writeFile(resource, buffer.buffer, writeOptions);
+		return undefined;
 	}
 
 	private async doPipeBuffered(sourceProvider: IFileSystemProviderWithOpenReadWriteCloseCapability, source: URI, targetProvider: IFileSystemProviderWithOpenReadWriteCloseCapability, target: URI): Promise<void> {
@@ -1486,7 +1517,8 @@ export class FileService extends Disposable implements IFileService {
 	}
 
 	private async doPipeUnbufferedQueued(sourceProvider: IFileSystemProviderWithFileReadWriteCapability, source: URI, targetProvider: IFileSystemProviderWithFileReadWriteCapability, target: URI): Promise<void> {
-		return targetProvider.writeFile(target, await sourceProvider.readFile(source), { create: true, overwrite: true, unlock: false, atomic: false });
+		const expectedEtag = await this.getCopyTargetEtag(targetProvider, target);
+		return targetProvider.writeFile(target, await sourceProvider.readFile(source), { create: true, overwrite: true, unlock: false, atomic: false, expectedEtag });
 	}
 
 	private async doPipeUnbufferedToBuffered(sourceProvider: IFileSystemProviderWithFileReadWriteCapability, source: URI, targetProvider: IFileSystemProviderWithOpenReadWriteCloseCapability, target: URI): Promise<void> {
@@ -1515,7 +1547,22 @@ export class FileService extends Disposable implements IFileService {
 		const buffer = await streamToBuffer(this.readFileBuffered(sourceProvider, source, CancellationToken.None));
 
 		// Write buffer into target at once
-		await this.doWriteUnbuffered(targetProvider, target, undefined, buffer);
+		const expectedEtag = await this.getCopyTargetEtag(targetProvider, target);
+		await this.doWriteUnbuffered(targetProvider, target, undefined, buffer, expectedEtag);
+	}
+
+	private async getCopyTargetEtag(provider: IFileSystemProvider, resource: URI): Promise<string | undefined> {
+		if (!(provider.capabilities & FileSystemProviderCapabilities.FileRevision)) {
+			return undefined;
+		}
+		try {
+			return (await provider.stat(resource)).etag ?? '';
+		} catch (error) {
+			if (toFileSystemProviderErrorCode(error) === FileSystemProviderErrorCode.FileNotFound) {
+				return '';
+			}
+			throw error;
+		}
 	}
 
 	protected throwIfFileSystemIsReadonly<T extends IFileSystemProvider>(provider: T, resource: URI): T {
