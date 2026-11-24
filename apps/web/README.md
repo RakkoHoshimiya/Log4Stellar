@@ -172,7 +172,7 @@ sh worktree-link-artifacts.sh <worktree-name>   # codicon.ttf 与扩展产物（
 | `LOG4STELLAR_GIT_WORKSPACE_ROOTS` | 未设置 | 允许关联的仓库根目录列表；**不设则 `/git/v1/*` 恒为 `503 GitNotConfigured`** |
 | `LOG4STELLAR_GIT_TIMEOUT_MS` | `60000` | 单次 Git 操作超时，取值须在 1000–600000 之间，超出范围回到默认 |
 
-正式主机的具体取值属于运维信息，记录在运维记录的运行手册里，不要提交进仓库。
+操作流程见[运维手册](docs/ops-runbook.md)。每个环境的实际参数由部署方通过服务配置注入。
 
 ### 端口与 TLS
 
@@ -438,7 +438,7 @@ node apps/web/deploy-release.mjs status
 和切换前的检查项列成可勾选列表，避免文档与实现脱节。
 
 ```sh
-# 启动（示例路径，按运维记录取值）
+# 启动前将示例路径替换为本环境的配置
 export LOG4STELLAR_AUTH_DIR=/srv/log4stellar/auth
 export LOG4STELLAR_WEB_ORIGIN=https://notes.example.com
 export LOG4STELLAR_TLS_CERT=/srv/tls/server.crt

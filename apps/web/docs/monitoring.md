@@ -100,9 +100,8 @@ Two knobs, both integer milliseconds:
 | `LOG4STELLAR_MONITOR_PROBE_TIMEOUT_MS` | `1500` | hard deadline for one probe round |
 | `LOG4STELLAR_MONITOR_PROBE_CACHE_MS` | `5000` | how long a probe result is reused |
 
-The caching is what keeps the probes from becoming the outage. `user_agent` has
-`rolconnlimit 10`, and a liveness loop that runs every second per instance would exhaust
-that budget on its own. Three properties make this safe:
+The caching is what keeps the probes from becoming the outage. A shared database role may have a small connection limit. Polling readiness
+without caching can consume that budget across instances. Three properties make this safe:
 
 1. **Results are cached, including failures.** A dead database is not re-dialled on every
    poll; the failure is reused for the cache window too, so a dependency that is down

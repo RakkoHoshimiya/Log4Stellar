@@ -15,24 +15,18 @@ Git 仓库接入，并为 PC 与 Android 提供独立客户端。
 
 ## 快速上手
 
-三步找到正在运行的产品入口：
+- **已有部署**。打开部署方提供的 HTTPS 地址，用分配的账号登录。工作台左侧打开笔记，右侧可查看大纲和版本历史。启用 Office 预览后，单击 DOCX、XLSX 或 PPTX 即可连续滚动阅读。
+- **第一次自托管**。在开发机或测试机按 [Web 服务端启动步骤](apps/web/README.md) 创建测试账号和独立工作区。先验证能打开示例笔记，再按 [运维手册](apps/web/docs/ops-runbook.md) 准备正式配置并发布。
+- **确认部署状态**。将下面的示例地址和 CA 路径替换为该部署的值。登录页与存活探针均应返回 `200`。再用测试账号打开一篇 Markdown，验证工作区本身可读。
 
-1. **看线上入口**。正式入口由部署方提供，形如 `https://<host>:<port>/`（生产环境的实际主机、
-   端口与发布包名记录在运维记录 `交付说明/ops-runbook.md`，不在本仓库内）。
-2. **确认服务活着**。用服务端证书请求登录页，返回 `200` 即正常：
+  ```bash
+  ORIGIN=https://notes.example.test:18990
+  CA_CERT=/path/to/ca.crt
+  curl --cacert "$CA_CERT" -sS -o /dev/null -w '%{http_code}\n' "$ORIGIN/login"
+  curl --cacert "$CA_CERT" -sS -o /dev/null -w '%{http_code}\n' "$ORIGIN/healthz"
+  ```
 
-   ```bash
-   curl --cacert <server.crt> -s -o /dev/null -w '%{http_code}\n' https://<host>:<port>/login
-   # 200
-   ```
-
-   同一个地址未登录访问 `/static/mount/`、`/sync/v1/snapshot`、`/git/v1/repository`
-   返回 `401`，说明网关、同步与 Git 路由都已挂上。
-3. **自己起一套隔离环境**。不需要碰生产：见 [apps/web/README.md](apps/web/README.md)
-   的「隔离环境最小启动」。跑测试用 `node --test apps/web/*.test.mjs`。
-
-要回退线上版本，看运维记录里的发布包切换与回滚流程（`交付说明/ops-runbook.md`）；本仓库内
-的能力状态以 [能力矩阵](#能力矩阵) 为准。
+维护服务时，发布、回滚、备份恢复和常见故障的操作均见[运维手册](apps/web/docs/ops-runbook.md)。凭据及正式地址由部署方保管。
 
 ## 能力矩阵
 
@@ -64,7 +58,7 @@ Git 仓库接入，并为 PC 与 Android 提供独立客户端。
 | Android 客户端 | 待验收 | Kotlin/Gradle 独立工程，APK 可构建；模拟器登录与真实同步未验收；旧账号数据作用域迁移、冲突处理界面、工作区选择仍待开发 |
 | 全文搜索（Markdown 正文、中文） | 待验收 | 服务端索引 + `GET /search/v1/query?q=` + 工作台搜索面板已实现；中文按子串匹配（PostgreSQL `simple` 分词会把整句变成一个词，无法命中词内子串）。索引更新是懒执行（每次查询最多补 25 条），无常驻 worker；端到端点选搜索面板尚未在真机走查 |
 | 知识关联（双链、标签、反向链接、断链） | 待验收 | Markdown AST 解析出链接与标签，建索引并提供 backlinks / tags / broken 接口与改名重写计划；工作台尚无反向链接、标签和断链面板 |
-| Office 文件预览（docx/xlsx/pptx → PDF） | 需配置 | 转换流水线、队列、租约、缓存与扩展入口均已实现并随包构建；默认关闭，需 `LOG4STELLAR_OFFICE_PREVIEW=1` 且容器内有 LibreOffice |
+| Office 文件预览（docx/xlsx/pptx → PDF） | 需配置 | 需开启 `LOG4STELLAR_OFFICE_PREVIEW=1` 并提供 LibreOffice 转换环境。启用后单击文件默认只读预览，加载期间显示进度，页面支持连续滚动 |
 | Web 离线编辑（草稿、离线队列、冲突） | 待验收 | IndexedDB 草稿 + 出站队列 + 幂等回放 + 冲突保留双方，离线模块尚未接入工作台编辑器，未做旧版草稿自动迁移 |
 | 多租户（租户、成员、邀请、审计） | 待验收 | 身份与成员在账户库，PostgreSQL 只存 `workspace_id → tenant_id` 映射；接口已实现，管理界面未做 |
 | 存储对象清理（标记-清扫） | 待验收 | 7 类引用探针 + 7 天宽限期 + CAS 候选状态机 + 恢复副本校验，**默认 dry-run**；尚未接 HTTP 入口、未在真实 RustFS 跑过全链路 |
@@ -109,15 +103,14 @@ Git 仓库接入，并为 PC 与 Android 提供独立客户端。
 
 ## 部署方式
 
-完整的部署、切换、回退与排障命令见 [apps/web/README.md](apps/web/README.md)；主机专有信息
-（真实主机名、端口、发布包名、证书路径）记录在运维记录 `交付说明/ops-runbook.md`。
+日常操作见[运维手册](apps/web/docs/ops-runbook.md)，部署参数和构建命令见 [Web 服务端说明](apps/web/README.md)。
 
 ### 前置
 
 - Node.js **24.x**（发布包在 `release.json` 里校验 `nodeMajor`，其它大版本拒绝启动）
 - PostgreSQL 16 及以上，一个可建表的 schema
 - S3 兼容对象存储（RustFS / MinIO / AWS S3）
-- 一个 HTTPS 证书（自签可用于内网验收）
+- HTTPS 证书和私钥（自签环境需在验收客户端信任对应证书）
 - Git（发布构建与 Git 集成功能需要）
 
 ### 构建发布包
@@ -165,7 +158,7 @@ node server/serve-demo.mjs log4stellar-main 18990 --release
   "s3": { "endpoint": "https://storage.example", "region": "us-east-1", "bucket": "log4stellar",
           "accessKeyId": "<application access key>", "secretAccessKey": "<application secret>" },
   "postgres": { "host": "database.example", "port": 5432, "database": "log4stellar",
-                "user": "user_agent", "password": "<database password>", "ssl": true }
+                "user": "log4stellar_app", "password": "<database password>", "ssl": true }
 }
 ```
 
@@ -174,21 +167,7 @@ node server/serve-demo.mjs log4stellar-main 18990 --release
 
 ### 升级与回滚
 
-发布包是自包含的：把新包放到 `releases/<名字>`，原子替换 `current-web-release` 软链并重启即可。
-回滚只需重新指向上一版包，**不需要回滚数据库**——所有迁移都是纯增量的
-（`CREATE TABLE IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`），旧版本代码可以读取新库。
-
-有两条与回滚有关的硬约束，写在这里避免事故：
-
-- **不是每个历史包都能用来回滚**。早于「跨租户越权修复」的中间包（`web-access-01`）永远不可
-  作为回滚目标。
-- **启用双因素之后，回滚目标必须仍然执行双因素门禁**。更早的包只允许在隔离环境演练。
-
-数据库迁移是幂等的独立步骤：
-
-```bash
-node server/sync-migrate.mjs          # 可重复执行
-```
+按[运维手册](apps/web/docs/ops-runbook.md)执行预检、备份和切换。发布工具校验候选包、管理当前与上一版本指针，并检查切换后的 HTTPS 入口。回滚前核对目标版本的数据库兼容性和双因素门禁，具体规则见[部署与回退](apps/web/docs/deploy-and-rollback.md)。
 
 ## 数据与备份
 
@@ -275,6 +254,7 @@ PC 与 Android 客户端**不在本仓库内**：它们是各自独立的 Git �
 | [工作区切换迁移](apps/web/docs/workspace-switch-migration.md) | 工作台挂载 URI 或旧草稿恢复策略变化时 |
 | [发布清单模板](apps/web/docs/release-checklist.md) | 每次产出并切换发布包时；它本身也维护着上面这张对照表 |
 | [构建与持续集成](apps/web/docs/build-and-ci.md) | 构建入口、CI 入口、`.nvmrc` 或发布包清单（`serverFiles`）变化时 |
+| [运维手册](apps/web/docs/ops-runbook.md) | 启动、发布、监控、备份恢复或故障处置步骤变化时 |
 | [部署与回退](apps/web/docs/deploy-and-rollback.md) | 发布包切换、回退策略、双因素回退约束或开机拉起方式变化时 |
 | [备份与恢复](apps/web/docs/backup-restore.md) | 备份成员契约、加密信封、恢复顺序或保留策略变化时 |
 | [运行监控](apps/web/docs/monitoring.md) | 探针端点、指标名/单位、告警阈值或日志字段变化时 |
