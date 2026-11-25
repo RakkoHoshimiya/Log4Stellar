@@ -15,12 +15,51 @@ function workspaceFromAuthority(authority) {
   return parts[1];
 }
 
+const languages = ['en', 'zh-cn', 'zh-tw', 'ja'];
+
+function languageOf() {
+	const locale = new Intl.Locale(vscode.env.language || 'en');
+	if (locale.language === 'zh') {
+		return locale.script === 'Hant' || (locale.script !== 'Hans' && ['TW', 'HK', 'MO'].includes(locale.region))
+			? 'zh-tw' : 'zh-cn';
+	}
+	return locale.language === 'ja' ? 'ja' : 'en';
+}
+
+function translated(row) {
+	return row[languages.indexOf(languageOf())];
+}
+
+const workspaceFeedback = {
+	SessionExpired: ['Your session expired. Sign in again.', '会话已过期，请重新登录。', '工作階段已到期，請重新登入。', 'セッションの有効期限が切れました。再度サインインしてください。'],
+	AccountChanged: ['The account changed. Reopen the workspace with the active account.', '当前账号已切换，请用当前账号重新打开工作区。', '目前帳號已切換，請使用目前帳號重新開啟工作區。', 'アカウントが変更されました。現在のアカウントでワークスペースを開き直してください。'],
+	NoPermissions: ['Your workspace role does not allow this action.', '当前工作区角色没有执行此操作的权限。', '目前工作區角色沒有執行此操作的權限。', '現在のワークスペース ロールではこの操作は許可されていません。'],
+	NetworkUnavailable: ['The server could not be reached. Check your connection and try again.', '无法连接服务器，请检查网络后重试。', '無法連線至伺服器，請檢查網路後再試。', 'サーバーに接続できません。接続を確認して再試行してください。'],
+	StorageObjectMissing: ['The stored file content is missing. Check the object storage or backup.', '存储中缺少文件内容，请检查对象存储或备份。', '儲存空間缺少檔案內容，請檢查物件儲存或備份。', 'ファイル本体がストレージにありません。オブジェクト ストレージまたはバックアップを確認してください。'],
+	SearchUnavailable: ['Full-text search is unavailable in this workspace.', '当前工作区的全文搜索不可用。', '目前工作區無法使用全文搜尋。', 'このワークスペースでは全文検索を利用できません。'],
+	InvalidQuery: ['Check the search text and try again.', '请检查搜索内容后重试。', '請檢查搜尋內容後再試。', '検索文字列を確認して再試行してください。'],
+	SearchCursorExpired: ['The search results expired. Run the search again.', '搜索结果已过期，请重新搜索。', '搜尋結果已到期，請重新搜尋。', '検索結果の有効期限が切れました。再度検索してください。'],
+	IndexRebuilding: ['The search index is being rebuilt. Try again shortly.', '搜索索引正在重建，请稍后再试。', '搜尋索引正在重建，請稍後再試。', '検索インデックスを再構築しています。しばらくしてから再試行してください。'],
+	SearchRequestFailed: ['The search failed. Try again.', '搜索失败，请重试。', '搜尋失敗，請再試一次。', '検索に失敗しました。再試行してください。'],
+	WorkspaceRequestFailed: ['The workspace request failed. Try again.', '工作区操作失败，请重试。', '工作區操作失敗，請再試一次。', 'ワークスペースの操作に失敗しました。再試行してください。'],
+};
+
+function failureCode(status, code, fallback) {
+	if (code === 'AccountChanged') return code;
+	if (status === 401) return 'SessionExpired';
+	if (status === 403) return 'NoPermissions';
+	return Object.hasOwn(workspaceFeedback, code) ? code : fallback;
+}
+
+function localizedFailure(code) {
+	return Object.assign(new Error(translated(workspaceFeedback[code])), { code });
+}
+
 const errorNames = {
 	FileNotFound: 'FileNotFound',
 	FileExists: 'FileExists',
 	FileNotADirectory: 'FileNotADirectory',
 	FileIsADirectory: 'FileIsADirectory',
-	NoPermissions: 'NoPermissions',
 };
 const saveErrors = {
 	'zh-cn': {
@@ -71,12 +110,16 @@ const previewErrors = {
 	PreviewUnavailable: 'unavailable',
 	FileNotFound: 'missing',
 	NoPermissions: 'denied',
+	AccountChanged: 'accountChanged',
 };
 
 function previewError(status, code) {
 	const error = new Error(code ?? 'PreviewRequestFailed');
 	error.name = 'PreviewRequestFailed';
-	error.reason = previewErrors[code] ?? (status === 403 || status === 401 ? 'denied' : status === 429 ? 'busy' : 'unavailable');
+	error.reason = code === 'AccountChanged' ? 'accountChanged'
+		: status === 401 ? 'expired'
+			: status === 403 ? 'denied'
+				: status === 429 ? 'busy' : previewErrorReason(code);
 	error.status = status;
 	return error;
 }
@@ -173,26 +216,33 @@ class WorkspaceFileSystem {
 		if (uri.authority?.startsWith('mount-')) {
 			headers.set('X-Log4Stellar-Workspace-Account', accountFromAuthority(uri.authority));
 		}
-		const response = await fetch(url, { cache: 'no-store', redirect: 'error', ...options, headers });
+		let response;
+		try {
+			response = await fetch(url, { cache: 'no-store', redirect: 'error', ...options, headers });
+		} catch (error) {
+			if (options?.signal?.aborted) throw error;
+			throw vscode.FileSystemError.Unavailable(translated(workspaceFeedback.NetworkUnavailable));
+		}
 		if (response.ok) {
 			return response;
 		}
 		const error = await response.json().catch(() => undefined);
 		const code = error?.error;
-		const errorName = errorNames[code];
+		const feedback = failureCode(response.status, code, 'WorkspaceRequestFailed');
+		if (feedback === 'SessionExpired' || feedback === 'AccountChanged' || feedback === 'NoPermissions') {
+			throw vscode.FileSystemError.NoPermissions(translated(workspaceFeedback[feedback]));
+		}
+		const errorName = Object.hasOwn(errorNames, code) ? errorNames[code] : undefined;
 		if (errorName) {
 			throw vscode.FileSystemError[errorName](uri);
 		}
-		if (response.status === 401 || response.status === 403 || code === 'AccountChanged') {
-			throw vscode.FileSystemError.NoPermissions(uri);
-		}
-		const messages = saveErrors[vscode.env.language] ?? saveErrors.en;
+		const messages = saveErrors[languageOf()];
 		if (code === 'FileChanged') {
 			const error = new Error(messages.FileChanged);
 			error.name = 'FileChanged (FileSystemError)';
 			throw error;
 		}
-		throw vscode.FileSystemError.Unavailable(messages[code] || `Workspace request failed (${response.status})`);
+		throw vscode.FileSystemError.Unavailable(Object.hasOwn(messages, code) ? messages[code] : translated(workspaceFeedback[feedback]));
 	}
 
 	async gitRequest(uri, endpoint, { query, body } = {}) {
@@ -252,14 +302,17 @@ class WorkspaceFileSystem {
 		if (body !== undefined) {
 			headers.set('Content-Type', 'application/json');
 		}
-		const response = await fetch(url, {
-			cache: 'no-store',
-			redirect: 'error',
-			headers,
-			...(body === undefined ? {} : { method: 'POST', body: JSON.stringify(body) }),
-			...(method === 'GET' ? {} : { method }),
-		});
-		return response;
+		try {
+			return await fetch(url, {
+				cache: 'no-store',
+				redirect: 'error',
+				headers,
+				...(body === undefined ? {} : { method: 'POST', body: JSON.stringify(body) }),
+				...(method === 'GET' ? {} : { method }),
+			});
+		} catch (error) {
+			throw Object.assign(localizedFailure('NetworkUnavailable'), { reason: 'network', cause: error });
+		}
 	}
 
 	/** `POST /api/v1/office-previews` — 200 ready, 202 queued, else a classified error. */
@@ -389,21 +442,24 @@ class WorkspaceFileSystem {
 			params.cursor = cursor;
 		}
 		url.search = new URLSearchParams(params).toString();
-		const response = await fetch(url, {
-			cache: 'no-store',
-			redirect: 'error',
-			headers: new Headers({
-				'X-Log4Stellar-Workspace': workspaceId,
-				'X-Log4Stellar-Workspace-Account': accountFromAuthority(uri.authority),
-			}),
-			signal,
-		});
+		let response;
+		try {
+			response = await fetch(url, {
+				cache: 'no-store',
+				redirect: 'error',
+				headers: new Headers({
+					'X-Log4Stellar-Workspace': workspaceId,
+					'X-Log4Stellar-Workspace-Account': accountFromAuthority(uri.authority),
+				}),
+				signal,
+			});
+		} catch (error) {
+			if (signal?.aborted) throw error;
+			throw localizedFailure('NetworkUnavailable');
+		}
 		const payload = await response.json().catch(() => undefined);
 		if (!response.ok) {
-			if (response.status === 401 || response.status === 403) {
-				throw new Error('NoPermissions');
-			}
-			throw new Error(payload?.error ?? 'SearchRequestFailed');
+			throw localizedFailure(failureCode(response.status, payload?.error, 'SearchRequestFailed'));
 		}
 		return payload;
 	}
@@ -496,7 +552,7 @@ const gitLabels = {
 };
 
 async function openGitRepository(provider, folder) {
-	const labels = gitLabels[vscode.env.language] ?? gitLabels.en;
+	const labels = gitLabels[languageOf()];
 	if (!folder) {
 		await vscode.window.showInformationMessage(labels.noBinding);
 		return;
@@ -636,8 +692,15 @@ async function pollPreviewStatus(provider, uri, previewId, {
 	throw Object.assign(new Error('PreviewNotReady'), { reason: 'notReady', preview: last });
 }
 
+function previewMessage(labels, reason, fallback = labels.unavailable) {
+	if (reason === 'expired') return translated(workspaceFeedback.SessionExpired);
+	if (reason === 'accountChanged') return translated(workspaceFeedback.AccountChanged);
+	if (reason === 'network') return translated(workspaceFeedback.NetworkUnavailable);
+	return Object.hasOwn(labels, reason) ? labels[reason] : fallback;
+}
+
 function previewErrorReason(code) {
-	return previewErrors[code] ?? 'unavailable';
+	return Object.hasOwn(previewErrors, code) ? previewErrors[code] : 'unavailable';
 }
 
 /**
@@ -647,7 +710,7 @@ function previewErrorReason(code) {
  * workspace switch (or a version restore) is visibly stale rather than silently wrong.
  */
 async function renderPreviewPane(provider, uri, preview, { labels, extensionUri } = {}) {
-	const messages = labels ?? previewLabels[vscode.env.language] ?? previewLabels.en;
+	const messages = labels ?? previewLabels[languageOf()];
 	const bytes = await provider.previewPdf(uri, preview.id);
 	const name = uri.path.split('/').pop() || 'document';
 	const version = preview.revisionId ? String(preview.revisionId).slice(0, 8) : '';
@@ -677,8 +740,12 @@ async function renderPreviewPane(provider, uri, preview, { labels, extensionUri 
 function configureOfficePreview(panel, extensionUri, messages, load, token) {
 	const viewerUri = panel.webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'office-viewer.mjs'));
 	const assetOrigin = escapeAttribute(new URL(viewerUri.toString()).origin);
-	const zh = vscode.env.language.startsWith('zh');
-	const drawError = zh ? '无法显示 PDF 预览，请重新打开。' : 'The PDF preview could not be displayed. Reopen it to try again.';
+	const drawError = translated([
+		'The PDF preview could not be displayed. Reopen it to try again.',
+		'无法显示 PDF 预览，请重新打开。',
+		'無法顯示 PDF 預覽，請重新開啟。',
+		'PDF プレビューを表示できません。開き直して再試行してください。',
+	]);
 	let disposed = false;
 	let result;
 	const listener = panel.webview.onDidReceiveMessage(async message => {
@@ -693,7 +760,7 @@ function configureOfficePreview(panel, extensionUri, messages, load, token) {
 			}
 		} catch (error) {
 			if (!disposed && error?.reason !== 'cancelled') {
-				const text = messages[error?.reason] ?? messages.unavailable;
+				const text = previewMessage(messages, error?.reason);
 				await panel.webview.postMessage({ type: 'error', text });
 			}
 		}
@@ -726,7 +793,7 @@ function registerOfficeEditor(context, provider) {
 			const uri = document.uri;
 			const token = new vscode.CancellationTokenSource();
 			panel.webview.options = { enableScripts: true, localResourceRoots: [context.extensionUri] };
-			const labels = previewLabels[vscode.env.language] ?? previewLabels.en;
+			const labels = previewLabels[languageOf()];
 			configureOfficePreview(panel, context.extensionUri, labels, async () => {
 				const pending = await provider.requestOfficePreview(uri);
 				const ready = pending.state === 'ready' ? pending
@@ -754,7 +821,7 @@ function escapeAttribute(value) {
  * the identity to the revision the server sees at request time.
  */
 async function openOfficePreview(provider, uri, options = {}) {
-	const labels = previewLabels[vscode.env.language] ?? previewLabels.en;
+	const labels = previewLabels[languageOf()];
 	if (!uri) {
 		return undefined;
 	}
@@ -790,7 +857,7 @@ async function openOfficePreview(provider, uri, options = {}) {
 		}
 	} catch (error) {
 		const reason = error?.reason ?? 'unavailable';
-		const message = labels[reason] ?? labels.unavailable;
+		const message = previewMessage(labels, reason);
 		if (reason === 'cancelled') {
 			return undefined;
 		}

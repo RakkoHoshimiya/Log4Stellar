@@ -1,3 +1,7 @@
 {
-  "workspace.tenants": "租户管理"
+  "workspace.tenants": "租户管理",
+  "workspace.displayName": "Log4Stellar 工作区",
+  "workspace.preview": "预览文档",
+  "workspace.previewVersion": "预览文档版本",
+  "workspace.officeEditor": "Log4Stellar Office 预览"
 }

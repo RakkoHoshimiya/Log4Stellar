@@ -138,6 +138,10 @@ async function smokeRelease(root) {
 		assert.equal((await get(asset, { method: 'HEAD' })).status, 200);
 		for (const locale of ['zh-cn', 'zh-tw', 'ja']) {
 			assert.equal((await get('/static/build/out/nls.messages.' + locale + '.js', { method: 'HEAD' })).status, 200);
+			const bundle = await get('/static/build/out/nls/' + locale + '/log4stellar.workspace-files.i18n.json');
+			assert.equal(bundle.status, 200, 'localized workspace manifest for ' + locale);
+			const messages = JSON.parse(bundle.body).contents.package;
+			assert.ok(messages['workspace.preview'] && messages['workspace.previewVersion'], 'Office commands for ' + locale);
 		}
 		for (const name of webGrammarPackages) {
 			const entry = name === 'vscode-oniguruma' ? 'onig.wasm' : 'main.js';

@@ -11,7 +11,8 @@
 	const api = '/api/v1/tenants';
 	const date = new Intl.DateTimeFormat(document.documentElement.lang, { dateStyle: 'medium', timeStyle: 'short' });
 	const errorLabels = {
-		AccountChanged: 'changed', LastAdmin: 'lastAdmin', VersionConflict: 'conflict', InvitationNotPending: 'conflict',
+		NetworkUnavailable: 'network', InvalidEmail: 'invalidEmail', InvalidTenantRole: 'invalidRole',
+		LastAdmin: 'lastAdmin', VersionConflict: 'conflict', InvitationNotPending: 'conflict',
 	};
 	let blocked = false;
 
@@ -38,7 +39,12 @@
 		if (body !== undefined) {
 			headers['Content-Type'] = 'application/json';
 		}
-		const response = await fetch(path, { method, headers, body: JSON.stringify(body), cache: 'no-store', redirect: 'error' });
+		let response;
+		try {
+			response = await fetch(path, { method, headers, body: JSON.stringify(body), cache: 'no-store', redirect: 'error' });
+		} catch (error) {
+			throw Object.assign(new Error('NetworkUnavailable', { cause: error }), { code: 'NetworkUnavailable' });
+		}
 		const data = await response.json().catch(() => undefined);
 		if (!response.ok) {
 			throw Object.assign(new Error(data?.error), { status: response.status, code: data?.error });
@@ -57,15 +63,22 @@
 		}
 	}
 
+	function feedbackLabel(error, invitation) {
+		if (error.code === 'AccountChanged') return 'changed';
+		if (error.status === 401) return 'expired';
+		if (invitation && (error.status === 404 || error.code === 'InvalidInvitationToken')) return 'badToken';
+		if (Object.hasOwn(errorLabels, error.code)) return errorLabels[error.code];
+		if (error.status === 403) return 'denied';
+		return error.status === 404 ? 'missing' : 'failed';
+	}
+
 	async function perform(run, { invitation = false } = {}) {
 		setBusy(true);
 		announce('loading');
 		try {
 			announce(await run());
 		} catch (error) {
-			const label = error.status === 401 ? 'expired'
-				: invitation && error.status === 404 ? 'badToken'
-					: errorLabels[error.code] ?? 'failed';
+			const label = feedbackLabel(error, invitation);
 			if (label === 'expired' || label === 'changed') {
 				blocked = true;
 				clearToken();
@@ -88,7 +101,8 @@
 	}
 
 	const tenantUrl = () => api + '/' + encodeURIComponent(select.value);
-	const roleText = role => strings[{ 1: 'member', 2: 'admin' }[role] ?? role] ?? String(role);
+	const roleText = role => strings[{ 1: 'member', 2: 'admin' }[role]] ?? strings.noAccess;
+	const workspaceRoleText = role => strings[{ 1: 'viewer', 2: 'editor', 3: 'owner', viewer: 'viewer', editor: 'editor', owner: 'owner' }[role]] ?? strings.noAccess;
 
 	function formatList(container, rows, render) {
 		container.replaceChildren(...rows.map(render));
@@ -180,7 +194,7 @@
 			const row = element('li');
 			const link = element('a', workspace.id);
 			link.href = '/?' + new URLSearchParams({ l4sWorkspace: workspace.id });
-			row.append(link, ' · ' + roleText(workspace.role));
+			row.append(link, ' · ' + workspaceRoleText(workspace.role));
 			return row;
 		});
 		if (selected.dataset.role === '2') {

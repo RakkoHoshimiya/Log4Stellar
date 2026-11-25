@@ -94,6 +94,37 @@ for (const event of ['keydown', 'pointerdown', 'pointerup', 'wheel', 'touchend']
 document.addEventListener('visibilitychange', checkSession);
 
 
+const workspaceDialogLabels = {
+  en: { title: 'Switch Workspace', current: ' (current)', cancel: 'Cancel', empty: 'No accessible workspaces.' },
+  'zh-cn': { title: '切换工作区', current: '（当前）', cancel: '取消', empty: '没有可访问的工作区。' },
+  'zh-tw': { title: '切換工作區', current: '（目前）', cancel: '取消', empty: '沒有可存取的工作區。' },
+  ja: { title: 'ワークスペースの切り替え', current: '（現在）', cancel: 'キャンセル', empty: '利用可能なワークスペースがありません。' },
+};
+
+function workspaceDialogLanguage() {
+  const preference = document.cookie.split('; ').find(part => part.startsWith('vscode.nls.locale='));
+  let explicit;
+  try {
+    if (preference) explicit = decodeURIComponent(preference.slice('vscode.nls.locale='.length));
+  } catch {
+    // A stale or malformed cookie can fall back to the browser preferences.
+  }
+  for (const candidate of [explicit, ...(navigator.languages ?? []), navigator.language]) {
+    if (!candidate || candidate === 'auto') continue;
+    try {
+      const locale = new Intl.Locale(candidate);
+      if (locale.language === 'zh') {
+        return locale.script === 'Hant' || (locale.script !== 'Hans' && ['TW', 'HK', 'MO'].includes(locale.region))
+          ? 'zh-tw' : 'zh-cn';
+      }
+      if (locale.language === 'ja' || locale.language === 'en') return locale.language;
+    } catch {
+      // Try the next preference.
+    }
+  }
+  return 'en';
+}
+
 let workspaceDialogOpen = false;
 window.addEventListener('log4stellar-switch-workspace', async event => {
   event.preventDefault();
@@ -106,23 +137,28 @@ window.addEventListener('log4stellar-switch-workspace', async event => {
     event.detail.onError();
     return;
   }
-  const localeCookie = document.cookie.split('; ').find(part => part.startsWith('vscode.nls.locale='));
-  const locale = localeCookie ? decodeURIComponent(localeCookie.slice('vscode.nls.locale='.length)) : navigator.language;
-  const chinese = locale.toLowerCase().startsWith('zh');
+  const labels = workspaceDialogLabels[workspaceDialogLanguage()];
   const dialog = document.createElement('dialog');
   dialog.setAttribute('aria-labelledby', 'l4s-workspace-title');
   dialog.style.cssText = 'background:var(--vscode-quickInput-background,#252526);color:var(--vscode-quickInput-foreground,#ddd);border:1px solid var(--vscode-focusBorder,#007acc);padding:20px;min-width:300px;font:13px sans-serif';
   const title = document.createElement('h2');
   title.id = 'l4s-workspace-title';
-  title.textContent = chinese ? '切换工作区' : 'Switch Workspace';
+  title.textContent = labels.title;
   dialog.append(title);
   const current = new URL(location.href).searchParams.get('l4sWorkspace') || state.workspaceId;
-  for (const workspace of state.workspaces) {
-    if (typeof workspace?.id !== 'string' || !/^[a-z0-9][a-z0-9-]{0,62}$/.test(workspace.id)) continue;
+  const workspaces = state.workspaces.filter(workspace =>
+    typeof workspace?.id === 'string' && /^[a-z0-9][a-z0-9-]{0,62}$/.test(workspace.id));
+  if (!workspaces.length) {
+    const empty = document.createElement('p');
+    empty.textContent = labels.empty;
+    dialog.append(empty);
+  }
+  for (const workspace of workspaces) {
     const button = document.createElement('button');
     button.type = 'button';
     button.style.cssText = 'display:block;width:100%;padding:8px;margin:4px 0;text-align:left;color:inherit;background:transparent;border:1px solid transparent;cursor:pointer';
-    button.textContent = workspace.id + (workspace.id === current ? (chinese ? '（当前）' : ' (current)') : '');
+    const name = typeof workspace.name === 'string' && workspace.name.trim() ? workspace.name : workspace.id;
+    button.textContent = name + (workspace.id === current ? labels.current : '');
     button.disabled = workspace.id === current;
     button.addEventListener('click', async () => {
       dialog.close();
@@ -135,7 +171,7 @@ window.addEventListener('log4stellar-switch-workspace', async event => {
   }
   const cancel = document.createElement('button');
   cancel.type = 'button';
-  cancel.textContent = chinese ? '取消' : 'Cancel';
+  cancel.textContent = labels.cancel;
   cancel.addEventListener('click', () => dialog.close());
   dialog.append(cancel);
   dialog.addEventListener('close', () => { dialog.remove(); workspaceDialogOpen = false; }, { once: true });

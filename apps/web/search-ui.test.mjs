@@ -27,11 +27,11 @@ const rootUri = uriOf('mount-Owner123.notes');
 const folder = { uri: rootUri, path: '/' };
 const plain = value => JSON.parse(JSON.stringify(value));
 
-function sandbox({ fetch: fetchImpl, origin = 'https://workspace.invalid' } = {}) {
+function sandbox({ fetch: fetchImpl, origin = 'https://workspace.invalid', language = 'en' } = {}) {
 	const module = { exports: {} };
 	const registered = {};
 	const vscode = {
-		env: { language: 'en' },
+		env: { language },
 		EventEmitter: class { constructor() { this.listeners = []; } fire() {} dispose() {} },
 		Position: class { constructor(line, character) { this.line = line; this.character = character; } },
 		Range: class { constructor(start, end) { this.start = start; this.end = end; } },
@@ -111,7 +111,7 @@ function page(items, extra = {}) {
 }
 
 async function textSearch(overrides = {}) {
-	const box = sandbox({ fetch: overrides.fetch });
+	const box = sandbox(overrides);
 	const instance = new (box.provider())(overrides.origin ?? 'https://workspace.invalid');
 	return { box, instance };
 }
@@ -287,25 +287,26 @@ test('a search cancelled before it starts never reaches the network', async () =
 
 // ------------------------------------------------------------------ failures
 
-test('a permission failure is reported as NoPermissions', async () => {
+test('search distinguishes an expired session from insufficient permissions', async () => {
 	for (const status of [401, 403]) {
 		const { instance } = await textSearch({
 			fetch: async () => new Response(JSON.stringify({ error: 'NoPermissions' }), { status, headers: { 'content-type': 'application/json' } }),
 		});
 		await assert.rejects(
 			instance.provideTextSearchResults({ pattern: 'x' }, { folder: folder.uri }, { report() {} }, token()),
-			/NoPermissions/,
+			{ code: status === 401 ? 'SessionExpired' : 'NoPermissions', message: status === 401 ? /Sign in again/ : /workspace role/ },
 		);
 	}
 });
 
-test('a server error code is surfaced instead of a generic failure', async () => {
+test('search cursor expiration retains its code and uses the active locale', async () => {
 	const { instance } = await textSearch({
+		language: 'zh-HK',
 		fetch: async () => new Response(JSON.stringify({ error: 'SearchCursorExpired' }), { status: 410, headers: { 'content-type': 'application/json' } }),
 	});
 	await assert.rejects(
 		instance.provideTextSearchResults({ pattern: 'x' }, { folder: folder.uri }, { report() {} }, token()),
-		/SearchCursorExpired/,
+		{ code: 'SearchCursorExpired', message: '搜尋結果已到期，請重新搜尋。' },
 	);
 });
 

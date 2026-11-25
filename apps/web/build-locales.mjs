@@ -24,6 +24,7 @@ const extensionIds = [
 	'vscode.theme-defaults',
 ];
 
+const workspaceExtensionId = 'log4stellar.workspace-files';
 const out = resolve(process.argv[2] ?? '.build/log4stellar-web/out');
 const readJson = async file => JSON.parse(await readFile(join(out, file), 'utf8'));
 const [keys, english] = await Promise.all([readJson('nls.keys.json'), readJson('nls.messages.json')]);
@@ -77,6 +78,9 @@ const localeManifest = await Promise.all(languages.map(async ({ id, label, pack 
 			`/* Microsoft vscode-loc ${revision}, MIT; see vscode-loc.LICENSE.md */\n`
 			+ `globalThis._VSCODE_NLS_MESSAGES = ${JSON.stringify(messages)};\n`
 			+ `globalThis._VSCODE_NLS_LANGUAGE = ${JSON.stringify(id)};\n`),
+		readFile(new URL(`./workspace-extension/package.nls.${id}.json`, import.meta.url), 'utf8')
+			.then(packageMessages => writeFile(join(translationPath, `${workspaceExtensionId}.i18n.json`),
+				JSON.stringify({ contents: { package: JSON.parse(packageMessages) } }))),
 		...extensionIds.map(async extensionId => {
 			const name = `${extensionId}.i18n.json`;
 			const data = JSON.parse(await download(`${translations}/extensions/${name}`));
@@ -91,7 +95,7 @@ const localeManifest = await Promise.all(languages.map(async ({ id, label, pack 
 		}),
 	]);
 	console.log(`${id}: ${translated}/${index} translated core strings`);
-	return { id, label, extensions: extensionIds };
+	return { id, label, extensions: [...extensionIds, workspaceExtensionId] };
 }));
 await writeFile(join(out, 'vscode-loc.LICENSE.md'), await download('LICENSE.md'));
 await writeFile(join(out, 'nls.locales.json'), JSON.stringify(localeManifest));

@@ -12,6 +12,13 @@ const translations = {
 		'2 段階認証', '確認コード', 'コードが正しくありません。もう一度お試しください。', 'リカバリーコード', '認証アプリの 6 桁のコード、またはリカバリーコードを入力してください。'],
 };
 
+const authFeedback = {
+	en: { unavailable: 'The sign-in service is unavailable. Try again shortly.', reused: 'This code has already been used. Wait for the next code in your authenticator app.' },
+	'zh-cn': { unavailable: '登录服务暂时不可用，请稍后再试。', reused: '此验证码已使用，请等待验证器生成下一个验证码。' },
+	'zh-tw': { unavailable: '登入服務暫時無法使用，請稍後再試。', reused: '此驗證碼已使用，請等待驗證器產生下一個驗證碼。' },
+	ja: { unavailable: 'サインイン サービスを現在利用できません。しばらくしてから再試行してください。', reused: 'このコードは使用済みです。認証アプリの次のコードをお待ちください。' },
+};
+
 // The code field accepts both a six digit code and a recovery code, so it is
 // sized for the longer one; a typed recovery code may carry separators (§7).
 const recoveryCodeInputLimit = 32;
@@ -22,7 +29,8 @@ export function webColorScheme(cookie) {
 
 export function loginPage(locale, notice, scheme, switching) {
 	const [title, username, password, invalid, limited, expired, switchAccount, forbidden] = translations[locale] ?? translations.en;
-	const message = { invalid, limited, expired, forbidden }[notice];
+	const { unavailable } = authFeedback[locale] ?? authFeedback.en;
+	const message = { invalid, limited, expired, forbidden, unavailable }[notice];
 	const heading = switching ? switchAccount : title;
 	const invalidFields = notice === 'invalid' ? ' aria-invalid="true" aria-describedby="login-notice"' : '';
 	return `<!doctype html>
@@ -180,7 +188,8 @@ ${message ? `<p class="notice" id="login-notice" role="alert">${message}</p>` : 
 export function secondFactorPage(locale, notice, scheme) {
 	const entries = translations[locale] ?? translations.en;
 	const [, , , , , , , , title, codeLabel, codeInvalid, recoveryLabel, instruction] = entries;
-	const message = notice === 'invalid' ? codeInvalid : undefined;
+	const { unavailable, reused } = authFeedback[locale] ?? authFeedback.en;
+	const message = { invalid: codeInvalid, limited: entries[4], unavailable, reused }[notice];
 	const resolved = webColorScheme(scheme);
 	const panel = `<!doctype html>
 <html lang="${locale}">
@@ -214,7 +223,7 @@ button { justify-self: end; min-width: 96px; padding: 5px 16px; border: 1px soli
 ${message ? `<p class="notice" id="login-notice" role="alert">${message}</p>` : ''}
 <div class="field">
 <label for="code">${codeLabel}</label>
-<input id="code" name="code" inputmode="text" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" required maxlength="${recoveryCodeInputLimit}"${message ? ' aria-invalid="true" aria-describedby="login-notice"' : ''}>
+<input id="code" name="code" inputmode="text" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" required maxlength="${recoveryCodeInputLimit}"${message ? ' aria-describedby="login-notice"' : ''}${notice === 'invalid' || notice === 'reused' ? ' aria-invalid="true"' : ''}>
 </div>
 <p class="instruction">${recoveryLabel}</p>
 <button type="submit">${title}</button>

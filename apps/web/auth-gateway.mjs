@@ -294,7 +294,12 @@ export function authGateway({ auth, origin, canReadWorkspace, matchesWorkspaceAc
 		{
 			const statusResponse = await callAuth(ctx, 'get-session');
 			if (!statusResponse.ok) {
-				ctx.status = statusResponse.status === 429 ? 429 : 503;
+				const status = statusResponse.status === 429 ? 429 : 503;
+				if (login) {
+					showLogin(ctx, localeOf(ctx), status === 429 ? 'limited' : 'unavailable', status);
+				} else {
+					ctx.status = status;
+				}
 				return;
 			}
 			session = await statusResponse.json();
@@ -321,8 +326,17 @@ export function authGateway({ auth, origin, canReadWorkspace, matchesWorkspaceAc
 					ctx.body = undefined;
 					redirect(ctx, workbenchPath);
 				} else {
-					showSecondFactor(ctx, locale, 'invalid', ctx.status);
+					const status = ctx.status;
+					const error = ctx.body?.error;
+					const notice = status >= 500 ? 'unavailable'
+						: status === 429 || error === 'TooManyAttempts' ? 'limited'
+							: error === accountSecurityErrorCodes.totpCodeReplayed ? 'reused' : 'invalid';
+					showSecondFactor(ctx, locale, notice, status);
 				}
+				return;
+			}
+			if (form.has('code')) {
+				showLogin(ctx, locale, 'expired', 401);
 				return;
 			}
 			const credentials = { username: form.get('username')?.trim() ?? '', password: form.get('password') ?? '', rememberMe: true };
@@ -358,7 +372,7 @@ export function authGateway({ auth, origin, canReadWorkspace, matchesWorkspaceAc
 			} else if (response.status === 429) {
 				showLogin(ctx, locale, 'limited', 429);
 			} else if (response.status >= 500) {
-				ctx.status = 503;
+				showLogin(ctx, locale, 'unavailable', 503);
 			} else {
 				showLogin(ctx, locale, 'invalid', 401);
 			}

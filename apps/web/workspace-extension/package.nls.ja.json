@@ -1,3 +1,7 @@
 {
-  "workspace.tenants": "テナント管理"
+  "workspace.tenants": "テナント管理",
+  "workspace.displayName": "Log4Stellar ワークスペース",
+  "workspace.preview": "文書をプレビュー",
+  "workspace.previewVersion": "文書のバージョンをプレビュー",
+  "workspace.officeEditor": "Log4Stellar Office プレビュー"
 }

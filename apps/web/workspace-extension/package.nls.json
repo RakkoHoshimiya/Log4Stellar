@@ -1,3 +1,7 @@
 {
-  "workspace.tenants": "Tenant Management"
+  "workspace.tenants": "Tenant Management",
+  "workspace.displayName": "Log4Stellar Workspace",
+  "workspace.preview": "Preview document",
+  "workspace.previewVersion": "Preview document version",
+  "workspace.officeEditor": "Log4Stellar Office Preview"
 }

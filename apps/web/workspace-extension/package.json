@@ -1,6 +1,6 @@
 {
   "name": "workspace-files",
-  "displayName": "Log4Stellar Workspace",
+  "displayName": "%workspace.displayName%",
   "publisher": "log4stellar",
   "version": "0.1.0",
   "private": true,
@@ -41,13 +41,13 @@
       },
       {
         "command": "log4stellar.workspace.preview",
-        "title": "Preview document",
+        "title": "%workspace.preview%",
         "category": "Log4Stellar",
         "icon": "$(open-preview)"
       },
       {
         "command": "log4stellar.workspace.previewVersion",
-        "title": "Preview document version",
+        "title": "%workspace.previewVersion%",
         "category": "Log4Stellar",
         "icon": "$(history)"
       },
@@ -87,7 +87,7 @@
     "customEditors": [
       {
         "viewType": "log4stellar.officePreview",
-        "displayName": "Log4Stellar Office Preview",
+        "displayName": "%workspace.officeEditor%",
         "selector": [
           {
             "filenamePattern": "*.[dD][oO][cC][xX]"
