@@ -185,14 +185,21 @@ jobs:
           test -f "$config"
           printf 'LOG4STELLAR_STORAGE_CONFIG=%s\n' "$config" >> "$GITHUB_ENV"
 
-      - name: Create the isolated bucket
+      - name: Initialize isolated database and object storage
         working-directory: apps/web
         run: |
           curl --fail --silent --show-error --retry 20 --retry-connrefused --retry-delay 1 http://127.0.0.1:9000/health
           node --input-type=module <<'JS'
           import { readFile } from 'node:fs/promises';
+          import { Pool } from 'pg';
           import { S3Client, CreateBucketCommand } from '@aws-sdk/client-s3';
-          const { s3 } = JSON.parse(await readFile(process.env.LOG4STELLAR_STORAGE_CONFIG, 'utf8'));
+          const { postgres, s3 } = JSON.parse(await readFile(process.env.LOG4STELLAR_STORAGE_CONFIG, 'utf8'));
+          const pool = new Pool(postgres);
+          try {
+            await pool.query('CREATE SCHEMA IF NOT EXISTS log4stellar');
+          } finally {
+            await pool.end();
+          }
           const client = new S3Client({ endpoint: s3.endpoint, region: s3.region, forcePathStyle: true, credentials: s3 });
           try {
             await client.send(new CreateBucketCommand({ Bucket: s3.bucket }));
