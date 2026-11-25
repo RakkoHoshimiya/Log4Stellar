@@ -16,6 +16,7 @@ export const tenantRoutePaths = Object.freeze({
 	member: '/api/v1/tenants/:tenantId/members/:userId',
 	audit: '/api/v1/tenants/:tenantId/audit',
 	accept: '/api/v1/invitations/accept',
+	workspaces: '/api/v1/tenants/:tenantId/workspaces',
 	workspace: '/api/v1/tenants/:tenantId/workspaces/:workspaceId',
 });
 
@@ -70,7 +71,7 @@ export function capabilityForTenantRequest(method, pathname) {
 		return method === 'GET' || method === 'HEAD' ? tenantCapabilities.admin : undefined;
 	}
 	if (rest.length === 2 && rest[1] === 'invitations') {
-		return method === 'POST' ? tenantCapabilities.admin : undefined;
+		return ['GET', 'HEAD', 'POST'].includes(method) ? tenantCapabilities.admin : undefined;
 	}
 	if (rest.length === 3 && rest[1] === 'invitations') {
 		return method === 'DELETE' ? tenantCapabilities.admin : undefined;
@@ -80,6 +81,9 @@ export function capabilityForTenantRequest(method, pathname) {
 	}
 	if (rest.length === 2 && rest[1] === 'audit') {
 		return method === 'GET' || method === 'HEAD' ? tenantCapabilities.admin : undefined;
+	}
+	if (rest.length === 2 && rest[1] === 'workspaces') {
+		return method === 'GET' || method === 'HEAD' ? tenantCapabilities.read : undefined;
 	}
 	if (rest.length === 3 && rest[1] === 'workspaces') {
 		// Content read, resolved one level deeper by the handler: the workspace capability
@@ -99,6 +103,8 @@ export const tenantSurfaceMatrix = Object.freeze([
 	Object.freeze({ method: 'GET', path: tenantRoutePaths.list, capability: tenantCapabilities.read, acceptance: 'T01' }),
 	Object.freeze({ method: 'POST', path: tenantRoutePaths.list, capability: 'platform.admin', acceptance: 'T04' }),
 	Object.freeze({ method: 'GET', path: tenantRoutePaths.members, capability: tenantCapabilities.admin, acceptance: 'T02' }),
+	Object.freeze({ method: 'GET', path: tenantRoutePaths.invitations, capability: tenantCapabilities.admin, acceptance: 'T02' }),
+	Object.freeze({ method: 'GET', path: tenantRoutePaths.workspaces, capability: tenantCapabilities.read, acceptance: 'T01' }),
 	Object.freeze({ method: 'POST', path: tenantRoutePaths.invitations, capability: tenantCapabilities.admin, acceptance: 'T02' }),
 	Object.freeze({ method: 'DELETE', path: tenantRoutePaths.invitation, capability: tenantCapabilities.admin, acceptance: 'T02' }),
 	Object.freeze({ method: 'PATCH', path: tenantRoutePaths.member, capability: tenantCapabilities.admin, acceptance: 'T03' }),

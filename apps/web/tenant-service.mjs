@@ -186,11 +186,14 @@ export const tenantPermissionMatrix = Object.freeze([
 	Object.freeze({ surface: 'GET /api/v1/tenants', tenantCapability: tenantCapabilities.read, workspaceCapability: null, note: 'returns only the caller\'s own memberships' }),
 	Object.freeze({ surface: 'POST /api/v1/tenants', tenantCapability: null, workspaceCapability: null, note: 'platform administrator only; idempotent by request key' }),
 	Object.freeze({ surface: 'GET /api/v1/tenants/:id/members', tenantCapability: tenantCapabilities.admin, workspaceCapability: null }),
+	Object.freeze({ surface: 'GET /api/v1/tenants/:id/invitations', tenantCapability: tenantCapabilities.admin, workspaceCapability: null }),
 	Object.freeze({ surface: 'POST /api/v1/tenants/:id/invitations', tenantCapability: tenantCapabilities.admin, workspaceCapability: null }),
+	Object.freeze({ surface: 'DELETE /api/v1/tenants/:id/invitations/:invitationId', tenantCapability: tenantCapabilities.admin, workspaceCapability: null }),
 	Object.freeze({ surface: 'POST /api/v1/invitations/accept', tenantCapability: null, workspaceCapability: null, note: 'the bearer token is the credential; no session membership is read' }),
 	Object.freeze({ surface: 'PATCH /api/v1/tenants/:id/members/:userId', tenantCapability: tenantCapabilities.admin, workspaceCapability: null }),
 	Object.freeze({ surface: 'DELETE /api/v1/tenants/:id/members/:userId', tenantCapability: tenantCapabilities.admin, workspaceCapability: null }),
 	Object.freeze({ surface: 'GET /api/v1/tenants/:id/audit', tenantCapability: tenantCapabilities.admin, workspaceCapability: null }),
+	Object.freeze({ surface: 'GET /api/v1/tenants/:id/workspaces', tenantCapability: tenantCapabilities.read, workspaceCapability: 'workspace.read' }),
 	// One route, two capabilities: the tenant gate is always `tenant.read`, and the
 	// workspace capability is chosen by the query string (`history=1`/`versions=1` asks
 	// for `workspace.history`), exactly like `capabilityForRequest` in

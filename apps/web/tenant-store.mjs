@@ -258,6 +258,10 @@ export function openTenantStore({ database, now = Date.now } = {}) {
 			WHERE tenant_id = ? AND user_id = ? AND version = ?
 		`),
 		deleteMember: database.prepare('DELETE FROM tenant_member WHERE tenant_id = ? AND user_id = ?'),
+		wasRevoked: database.prepare(`
+			SELECT 1 AS found FROM tenant_audit
+			WHERE tenant_id = ? AND target = ? AND action = 'member.revoke' LIMIT 1
+		`),
 		countAdmins: database.prepare('SELECT COUNT(*) AS total FROM tenant_member WHERE tenant_id = ? AND role = ?'),
 		listMemberPage: database.prepare(`
 			SELECT member.user_id AS userId, member.role AS role, member.version AS version,
@@ -284,7 +288,16 @@ export function openTenantStore({ database, now = Date.now } = {}) {
 			UPDATE tenant_invitation SET accepted_ms = ?, accepted_by = ?
 			WHERE id = ? AND accepted_ms IS NULL AND revoked_ms IS NULL AND expires_ms > ?
 		`),
-		revokeInvitation: database.prepare('UPDATE tenant_invitation SET revoked_ms = ? WHERE id = ? AND accepted_ms IS NULL AND revoked_ms IS NULL'),
+		revokeInvitation: database.prepare(`
+			UPDATE tenant_invitation SET revoked_ms = ?
+			WHERE tenant_id = ? AND id = ? AND accepted_ms IS NULL AND revoked_ms IS NULL AND expires_ms > ?
+		`),
+		listPendingInvitations: database.prepare(`
+			SELECT id AS invitationId, email, role, expires_ms AS expiresMs
+			FROM tenant_invitation
+			WHERE tenant_id = ? AND id > ? AND accepted_ms IS NULL AND revoked_ms IS NULL AND expires_ms > ?
+			ORDER BY id LIMIT ?
+		`),
 		// Two "last admin" guards race each other unless both run inside one write
 		// transaction: each reads a count that still includes the other, both decrement,
 		// and the tenant is left with no administrator (acceptance case T03).
@@ -414,7 +427,7 @@ export function openTenantStore({ database, now = Date.now } = {}) {
 		 * changed. This is the only entry point that creates a tenant without an owning
 		 * principal, and it is intentionally not reachable over HTTP.
 		 */
-		seedLegacyTenant({ tenantId = legacyTenantId, name = 'Default', adminIds = [], actorId = 'migration' } = {}) {
+		seedLegacyTenant({ tenantId = legacyTenantId, name = 'Default', adminIds = [], memberIds = [], actorId = 'migration' } = {}) {
 			if (typeof tenantId !== 'string' || tenantId.length === 0) {
 				throw new WorkspaceError(400, 'InvalidTenantId');
 			}
@@ -432,21 +445,24 @@ export function openTenantStore({ database, now = Date.now } = {}) {
 				// so `GET /api/v1/tenants` answered `{"tenants":[]}` forever and the sole
 				// operator could never administer their own deployment.
 				let admins = 0;
-				for (const adminId of adminIds) {
-					if (typeof adminId !== 'string' || adminId.length === 0) {
+				let members = 0;
+				const principals = [...adminIds.map(id => [id, tenantRoles.admin]), ...memberIds.map(id => [id, tenantRoles.member])];
+				for (const [id, role] of principals) {
+					// The append-only revocation record prevents startup from granting old workspace members access again.
+					if (typeof id !== 'string' || !id || statements.wasRevoked.get(tenantId, id)) {
 						continue;
 					}
-					// INSERT OR IGNORE, not a read-then-insert: two processes starting the
-					// migration at once must not both decide the same account needs a row.
-					// It also keeps a demoted administrator demoted: an existing row — any
-					// role — wins, so re-seeding an operator's decision cannot undo it.
-					if (statements.insertMember.run(tenantId, adminId, tenantRoles.admin, at, at).changes === 1) {
-						admins++;
+					if (statements.insertMember.run(tenantId, id, role, at, at).changes === 1) {
+						if (role === tenantRoles.admin) {
+							admins++;
+						} else {
+							members++;
+						}
 					}
 				}
 				const resolvedName = existing ? existing.name : String(name).trim() || 'Default';
-				if (!existing || admins > 0) {
-					audit(tenantId, actorId, 'tenant.seed', tenantId, { admins, created: !existing });
+				if (!existing || admins + members > 0) {
+					audit(tenantId, actorId, 'tenant.seed', tenantId, { admins, members, created: !existing });
 				}
 				return { tenantId, name: resolvedName, created: !existing, admins };
 			});
@@ -544,10 +560,18 @@ export function openTenantStore({ database, now = Date.now } = {}) {
 			});
 		},
 
+		listPendingInvitations(userId, tenantId, { cursor = '', limit = 50 } = {}) {
+			requireAdmin(userId, tenantId);
+			const rows = statements.listPendingInvitations.all(tenantId, cursor, now(), limit + 1);
+			const invitations = rows.slice(0, limit);
+			return { invitations, nextCursor: rows.length > limit ? invitations.at(-1).invitationId : null };
+		},
+
 		revokeInvitation(userId, tenantId, invitationId) {
 			requireAdmin(userId, tenantId);
 			return write(() => {
-				const changes = statements.revokeInvitation.run(now(), invitationId).changes;
+				const at = now();
+				const changes = statements.revokeInvitation.run(at, tenantId, invitationId, at).changes;
 				if (changes !== 1) {
 					throw new WorkspaceError(409, 'InvitationNotPending');
 				}

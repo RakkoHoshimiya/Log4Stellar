@@ -267,14 +267,15 @@ export async function openAuth({ workspaceId = resolveWorkspaceId({ environment:
 	// already own the configured workspace. Idempotent: a second open keeps the name and
 	// any role an operator has since changed.
 	try {
+		const legacyMembers = database.prepare(`
+			SELECT user_id AS userId, role FROM workspace_member
+			WHERE tenant_id = ? AND workspace_id = ? ORDER BY rowid
+		`).all(tenant, workspaceId);
 		tenants.seedLegacyTenant({
 			tenantId: legacyTenantId,
 			name: 'Default',
-			adminIds: database.prepare(`
-				SELECT user_id AS userId FROM workspace_member
-				WHERE tenant_id = ? AND workspace_id = ? AND role = ?
-				ORDER BY rowid
-			`).all(tenant, workspaceId, workspaceRoles.owner).map(row => row.userId),
+			adminIds: legacyMembers.filter(row => row.role === workspaceRoles.owner).map(row => row.userId),
+			memberIds: legacyMembers.filter(row => row.role !== workspaceRoles.owner).map(row => row.userId),
 		});
 	} catch (error) {
 		// A database whose `workspace_member` table is older than roles (a deployment that

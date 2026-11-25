@@ -9,6 +9,7 @@
 | 主题 | 文档 |
 |---|---|
 | 工作区、角色与 capability 判权 | [docs/workspace-access.md](docs/workspace-access.md) |
+| Web 租户管理、邀请与审计 | [docs/multi-tenant.md](docs/multi-tenant.md) |
 | 增量同步（快照、游标、冲突） | [docs/incremental-sync.md](docs/incremental-sync.md) |
 | 账户安全与双因素 | [docs/account-security.md](docs/account-security.md)、[运行时交付](docs/account-security-takeover.md)、[接线方案](docs/account-security-wiring.md) |
 | Git 仓库接入 | [docs/git-integration.md](docs/git-integration.md) |

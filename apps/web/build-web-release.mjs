@@ -46,6 +46,7 @@ const serverFiles = [
 	// tree, so both the checks and the CLI ship with the release.
 	'supply-chain.mjs',
 	'sync-contract.mjs', 'sync-files.mjs', 'sync-migrate.mjs', 'sync-schema.sql', 'sync-store.mjs',
+	'tenant-management-page.mjs', 'tenant-management-client.js',
 	'tenant-contract.mjs', 'tenant-files.mjs', 'tenant-migrate.mjs', 'tenant-schema.sql',
 	'tenant-service.mjs', 'tenant-store.mjs',
 	'verify-web-release.mjs', 'web-release.mjs', 'workspace-access.mjs',
@@ -136,7 +137,7 @@ try {
 		await copyFiles(from, join(stage, 'extensions', name), ['package.json', 'package.nls.json', ...assets]);
 	}
 	await copyFiles(join(app, 'workspace-extension'), join(stage, 'extensions', 'workspace-files'),
-		['package.json', 'package.nls.json', 'extension.js', 'office-viewer.mjs']);
+		['package.json', 'package.nls.json', 'package.nls.zh-cn.json', 'package.nls.zh-tw.json', 'package.nls.ja.json', 'extension.js', 'office-viewer.mjs']);
 	const pdfjs = join(app, 'node_modules', 'pdfjs-dist');
 	const workspaceExtension = join(stage, 'extensions', 'workspace-files');
 	await copyFiles(join(pdfjs, 'build'), workspaceExtension, ['pdf.min.mjs', 'pdf.worker.min.mjs']);

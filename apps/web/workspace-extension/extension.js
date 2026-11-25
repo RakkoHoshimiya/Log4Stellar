@@ -829,6 +829,8 @@ async function activate(context) {
 		}
 		return openOfficePreview(provider, active, { extensionUri: context.extensionUri, chooseVersion: true });
 	}));
+	context.subscriptions.push(vscode.commands.registerCommand('log4stellar.workspace.tenants', () =>
+		vscode.env.openExternal(vscode.Uri.parse(new URL('/account/tenants', provider.origin).toString()))));
 	context.subscriptions.push(vscode.commands.registerCommand('log4stellar.workspace.git', () => {
 		const folder = vscode.workspace.workspaceFolders?.find(item => item.uri.scheme === scheme);
 		return openGitRepository(provider, folder);

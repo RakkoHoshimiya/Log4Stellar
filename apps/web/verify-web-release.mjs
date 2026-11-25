@@ -117,6 +117,16 @@ async function smokeRelease(root) {
 		assert.match(security.body.toString(), /账户安全/);
 		assert.match(security.headers['content-security-policy'], /script-src 'self'/);
 		assert.equal((await get('/account/security.js')).status, 200);
+		const protectedTenants = await get('/account/tenants');
+		assert.equal(protectedTenants.status, 303);
+		assert.equal(protectedTenants.headers.location, '/login');
+		const tenantPage = await get('/account/tenants', options);
+		assert.equal(tenantPage.status, 200);
+		assert.match(tenantPage.body.toString(), /租户管理/);
+		assert.match(tenantPage.headers['content-security-policy'], /script-src 'self'/);
+		assert.match(tenantPage.headers['cache-control'], /no-store/);
+		assert.equal((await get('/account/tenants.js')).status, 200);
+		assert.equal((await get('/api/v1/tenants')).status, 401);
 		const html = workbench.body.toString();
 		assert.match(html, /nls\.messages\.zh-cn\.js/);
 		const config = html.match(/<meta id="vscode-workbench-web-configuration" data-settings="([^"]+)"/);

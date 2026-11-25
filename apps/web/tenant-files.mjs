@@ -18,6 +18,7 @@
 //     account, and accepting an invitation without being signed in would have to invent a
 //     principal.
 
+import { randomBytes } from 'node:crypto';
 import { WorkspaceError } from './workspace-contract.mjs';
 import { capabilityForTenantRequest, tenantPageLimits, tenantEmailPattern } from './tenant-contract.mjs';
 import { resolveTenantScope, tenantCapabilities } from './tenant-service.mjs';
@@ -62,8 +63,11 @@ async function readJson(ctx) {
 // derived id would let one tenant claim another's identifier by renaming itself.
 const tenantIdPattern = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
-function requireTenantId(value) {
-	if (typeof value !== 'string' || !tenantIdPattern.test(value)) {
+// IDs generated before the Web UI used a fixed-width base64url suffix.
+const legacyGeneratedIdPattern = /^t-[A-Za-z0-9_-]{24}$/;
+
+function requireTenantId(value, { stored = false } = {}) {
+	if (typeof value !== 'string' || !(tenantIdPattern.test(value) || (stored && legacyGeneratedIdPattern.test(value)))) {
 		throw new WorkspaceError(400, 'InvalidTenantId');
 	}
 	return value;
@@ -124,7 +128,7 @@ function limitOf(query, fallback, maximum) {
  * decision "may this account create tenants at all" — kept as a callback because it is
  * deployment policy, not tenant policy.
  */
-export async function serveTenantRequest(ctx, { principalId, store, readWorkspaceMapping, resolveWorkspaceRole, isPlatformAdmin, createTenantRecord }) {
+export async function serveTenantRequest(ctx, { principalId, store, readWorkspaceMapping, resolveWorkspaceRole, workspacesOf = () => [], isPlatformAdmin, createTenantRecord }) {
 	try {
 		const capability = capabilityForTenantRequest(ctx.method, ctx.path);
 		if (capability === undefined) {
@@ -179,7 +183,7 @@ export async function serveTenantRequest(ctx, { principalId, store, readWorkspac
 			throw new WorkspaceError(405, 'MethodNotAllowed');
 		}
 
-		const tenantId = requireTenantId(segments[0]);
+		const tenantId = requireTenantId(segments[0], { stored: true });
 
 		// GET /api/v1/tenants/:id/members — administration only.
 		if (segments.length === 2 && segments[1] === 'members') {
@@ -194,6 +198,16 @@ export async function serveTenantRequest(ctx, { principalId, store, readWorkspac
 				return;
 			}
 			throw new WorkspaceError(405, 'MethodNotAllowed');
+		}
+
+		if (segments.length === 2 && segments[1] === 'invitations' && ctx.method !== 'POST') {
+			await resolveTenantScope({ store, principalId, tenantId, capability });
+			const cursor = ctx.query.cursor === undefined ? '' : requireTenantId(ctx.query.cursor, { stored: true });
+			ctx.body = store.listPendingInvitations(principalId, tenantId, {
+				cursor, limit: limitOf(ctx.query, tenantPageLimits.defaultMembers, tenantPageLimits.maxMembers),
+			});
+			ctx.status = 200;
+			return;
 		}
 
 		// POST /api/v1/tenants/:id/invitations — the token is generated here, returned once,
@@ -222,7 +236,7 @@ export async function serveTenantRequest(ctx, { principalId, store, readWorkspac
 		// DELETE /api/v1/tenants/:id/invitations/:invitationId — withdraw a pending invite.
 		if (segments.length === 3 && segments[1] === 'invitations' && ctx.method === 'DELETE') {
 			const scope = await resolveTenantScope({ store, readWorkspaceMapping, principalId, tenantId, capability: tenantCapabilities.admin, resolveWorkspaceRole });
-			ctx.body = store.revokeInvitation(principalId, scope.tenantId, requireTenantId(segments[2]));
+			ctx.body = store.revokeInvitation(principalId, scope.tenantId, requireTenantId(segments[2], { stored: true }));
 			ctx.status = 200;
 			return;
 		}
@@ -262,6 +276,22 @@ export async function serveTenantRequest(ctx, { principalId, store, readWorkspac
 				limit: limitOf(ctx.query, tenantPageLimits.defaultAudit, tenantPageLimits.maxAudit),
 				action: typeof ctx.query.action === 'string' && ctx.query.action.length > 0 ? ctx.query.action : null,
 			});
+			ctx.status = 200;
+			return;
+		}
+
+		if (segments.length === 2 && segments[1] === 'workspaces') {
+			await resolveTenantScope({ store, principalId, tenantId, capability });
+			const workspaces = [];
+			if (readWorkspaceMapping) {
+				for (const { id, role } of workspacesOf(principalId)) {
+					const mapping = await readWorkspaceMapping(id);
+					if (mapping?.status === 'active' && mapping.tenantId === tenantId) {
+						workspaces.push({ id, role });
+					}
+				}
+			}
+			ctx.body = { workspaces };
 			ctx.status = 200;
 			return;
 		}
@@ -342,7 +372,7 @@ async function createTenantWithMapping({ store, createTenantRecord, tenantId, na
 }
 
 function randomTenantId() {
-	return 't-' + randomToken().slice(0, 24);
+	return 't-' + randomBytes(16).toString('hex');
 }
 
 function randomToken() {

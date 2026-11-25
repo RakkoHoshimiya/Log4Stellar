@@ -710,9 +710,9 @@ function context({ method = 'GET', path = '/api/v1/tenants', query = {}, body = 
 	};
 }
 
-function handler({ store = twoTenants().store, readWorkspaceMapping = mappingOf([]), resolveWorkspaceRole = () => undefined, isPlatformAdmin = () => false, createTenantRecord = undefined } = {}) {
+function handler({ store = twoTenants().store, readWorkspaceMapping = mappingOf([]), resolveWorkspaceRole = () => undefined, workspacesOf = () => [], isPlatformAdmin = () => false, createTenantRecord = undefined } = {}) {
 	return async ctx => {
-		await serveTenantRequest(ctx, { principalId: 'user-a', store, readWorkspaceMapping, resolveWorkspaceRole, isPlatformAdmin, createTenantRecord });
+		await serveTenantRequest(ctx, { principalId: 'user-a', store, readWorkspaceMapping, resolveWorkspaceRole, workspacesOf, isPlatformAdmin, createTenantRecord });
 		return ctx;
 	};
 }
@@ -722,6 +722,80 @@ test('the tenant list returns only the caller\'s own memberships', async () => {
 	const ctx = await handler({ store })(context());
 	assert.equal(ctx.status, 200);
 	assert.deepEqual(ctx.body.tenants.map(tenant => tenant.tenantId), [tenantIdOf('alpha')]);
+});
+
+test('legacy initialization adopts previous members once and never restores a revoked grant', () => {
+	const db = database(['user-a', 'user-b', 'user-viewer']);
+	const store = openTenantStore({ database: db, now: clock() });
+	const seed = { tenantId: legacyTenantId, adminIds: ['user-a', 'user-b'], memberIds: ['user-viewer'] };
+	store.seedLegacyTenant(seed);
+	assert.equal(store.describeMembership('user-viewer', legacyTenantId).role, tenantRoles.member);
+	store.revokeTenantMember('user-a', legacyTenantId, 'user-b', { expectedVersion: 1 });
+	store.revokeTenantMember('user-a', legacyTenantId, 'user-viewer', { expectedVersion: 1 });
+	openTenantStore({ database: db, now: clock() }).seedLegacyTenant(seed);
+	assert.deepEqual(store.listTenants('user-b'), []);
+	assert.deepEqual(store.listTenants('user-viewer'), []);
+});
+
+test('tenant workspace picker intersects concrete workspace roles and active tenant mappings', async () => {
+	const { store } = twoTenants();
+	const alpha = tenantIdOf('alpha');
+	const beta = tenantIdOf('beta');
+	const handles = handler({
+		store,
+		workspacesOf: () => [{ id: 'ws-a', role: 3 }, { id: 'ws-b', role: 1 }, { id: 'ws-pending', role: 1 }],
+		readWorkspaceMapping: id => ({
+			'ws-a': { tenantId: alpha, status: 'active' },
+			'ws-b': { tenantId: beta, status: 'active' },
+			'ws-pending': { tenantId: alpha, status: 'pending' },
+		})[id],
+	});
+	const allowed = await handles(context({ path: '/api/v1/tenants/' + alpha + '/workspaces' }));
+	assert.deepEqual(allowed.body, { workspaces: [{ id: 'ws-a', role: 3 }] });
+	assert.equal((await handles(context({ path: '/api/v1/tenants/' + beta + '/workspaces' }))).status, 404);
+});
+
+test('invitation listing contains pending invitations only and revocation is tenant-scoped', async () => {
+	const { store } = twoTenants();
+	const alpha = tenantIdOf('alpha');
+	const beta = tenantIdOf('beta');
+	const path = '/api/v1/tenants/' + alpha + '/invitations';
+	const make = (tenantId, actor, id, tokenDigest) => store.issueInvitation(actor, tenantId, {
+		invitationId: id, email: 'recipient@example.test', role: 'member', tokenDigest,
+	});
+	make(alpha, 'user-a', 'invite-a', 'a'.repeat(64));
+	make(alpha, 'user-a', 'invite-z', 'c'.repeat(64));
+	make(beta, 'user-b', 'invite-b', 'b'.repeat(64));
+	const handles = handler({ store });
+	const first = await handles(context({ path, query: { limit: '1' } }));
+	assert.equal(first.body.nextCursor, 'invite-a');
+	assert.equal(first.body.invitations[0].invitationId, 'invite-a');
+	assert.equal('tokenDigest' in first.body.invitations[0], false);
+	const second = await handles(context({ path, query: { cursor: first.body.nextCursor, limit: '1' } }));
+	assert.equal(second.body.invitations[0].invitationId, 'invite-z');
+	assert.equal(second.body.nextCursor, null);
+	assert.equal((await handles(context({ method: 'DELETE', path: path + '/invite-b' }))).status, 409);
+	assert.equal(store.listPendingInvitations('user-b', beta).invitations[0].invitationId, 'invite-b');
+	assert.equal((await handles(context({ method: 'DELETE', path: path + '/invite-a' }))).status, 200);
+	assert.deepEqual((await handles(context({ path }))).body.invitations.map(row => row.invitationId), ['invite-z']);
+});
+
+test('invitation IDs generated today and before the Web UI can both be revoked', async () => {
+	const { store } = twoTenants();
+	const tenantId = tenantIdOf('alpha');
+	const path = '/api/v1/tenants/' + tenantId + '/invitations';
+	const handles = handler({ store });
+	const issued = await handles(context({
+		method: 'POST', path, body: { email: 'recipient@example.test', role: 'member' },
+		headers: { 'content-type': 'application/json' },
+	}));
+	assert.equal(issued.status, 201);
+	assert.match(issued.body.invitationId, /^t-[a-f0-9]{32}$/);
+	assert.equal((await handles(context({ method: 'DELETE', path: path + '/' + issued.body.invitationId }))).status, 200);
+	const legacyId = 't-' + 'Ab_-'.repeat(6);
+	store.issueInvitation('user-a', tenantId, { invitationId: legacyId, email: 'recipient@example.test', role: 'member', tokenDigest: 'a'.repeat(64) });
+	assert.equal((await handles(context({ path, query: { cursor: legacyId } }))).status, 200);
+	assert.equal((await handles(context({ method: 'DELETE', path: path + '/' + legacyId }))).status, 200);
 });
 
 test('creating a tenant without the platform right is a 403 and writes nothing', async () => {

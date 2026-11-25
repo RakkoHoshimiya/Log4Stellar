@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import { tenantManagementPage } from './tenant-management-page.mjs';
 import { accountSecurityPage } from './account-security-page.mjs';
 import {
 	accountSecurityErrorCodes,
@@ -25,6 +26,8 @@ import { invitationAcceptPath, serveTenantRequest, tenantPath } from './tenant-f
 
 const sessionClient = await readFile(new URL('./session-client.js', import.meta.url), 'utf8');
 const accountSecurityClient = await readFile(new URL('./account-security-client.js', import.meta.url), 'utf8');
+const tenantManagementClient = await readFile(new URL('./tenant-management-client.js', import.meta.url), 'utf8');
+const tenantManagementPath = '/account/tenants';
 const accountSecurityPagePath = '/account/security';
 const loginPath = '/login';
 const workbenchPath = '/';
@@ -70,14 +73,14 @@ async function readForm(ctx) {
  * failure path is the same 403 so a non-member cannot tell "not a member" from
  * "no such workspace" (contract §5).
  */
-async function resolveWorkspace(ctx, session, { defaultWorkspaceId, resolveRole, workspaces }) {
+async function resolveWorkspace(ctx, session, { defaultWorkspaceId, resolveRole, workspaces, allowsMappedWorkspace }) {
 	const requested = ctx.get(workspaceHeader);
 	const workspaceId = requested ? requested.toLowerCase() : defaultWorkspaceId(session.user.id);
 	if (!workspaceId || !isValidWorkspaceId(workspaceId)) {
 		return undefined;
 	}
 	const role = resolveRole(session.user.id, workspaceId);
-	if (role === undefined) {
+	if (role === undefined || !await allowsMappedWorkspace(session.user.id, workspaceId)) {
 		return undefined;
 	}
 	let backend;
@@ -102,6 +105,25 @@ function routeParameters(pathname) {
 // deployment that does not pass one gets a 404 from that mount rather than an
 // unauthenticated route, which is why they default to undefined instead of throwing.
 export function authGateway({ auth, origin, canReadWorkspace, matchesWorkspaceAccount, defaultWorkspaceId, workspacesOf, resolveRole, workspaces, openGitBackend, openKnowledgeStore, openOfficePreview, resolveChallenge, accountSecurity, tenants, readWorkspaceMapping, isPlatformAdmin, createTenantRecord }, maxUploadBytes, localeOf, webviewHost) {
+	async function allowsMappedWorkspace(userId, workspaceId) {
+		const mapping = await readWorkspaceMapping?.(workspaceId);
+		if (!mapping) {
+			return true;
+		}
+		if (mapping.status !== 'active' || !tenants) {
+			return false;
+		}
+		try {
+			tenants.describeMembership(userId, mapping.tenantId);
+			return true;
+		} catch (error) {
+			if (error.status === 404) {
+				return false;
+			}
+			throw error;
+		}
+	}
+
 	async function callAuth(ctx, endpoint, method = 'GET', body) {
 		const headers = new Headers({
 			Cookie: ctx.get('Cookie'),
@@ -189,7 +211,8 @@ export function authGateway({ auth, origin, canReadWorkspace, matchesWorkspaceAc
 		const officePreviewing = typeof openOfficePreview === 'function'
 			&& (ctx.path === officePreviewPath || ctx.path.startsWith(officePreviewPath + '/'));
 		const api = ctx.path === '/api/session' || ctx.path.startsWith('/api/session/');
-		const accountSettings = ctx.path === accountSecurityPagePath;
+		const tenantManagement = ctx.path === tenantManagementPath;
+		const accountSettings = ctx.path === accountSecurityPagePath || tenantManagement;
 		const login = ctx.path === loginPath;
 		const workbench = ctx.path === workbenchPath;
 		// Both of these used to fall through to the application. They must not: one
@@ -209,11 +232,11 @@ export function authGateway({ auth, origin, canReadWorkspace, matchesWorkspaceAc
 			ctx.body = sessionClient;
 			return;
 		}
-		if (ctx.path === accountSecurityPagePath + '.js' && ctx.method === 'GET') {
+		if ([accountSecurityPagePath, tenantManagementPath].some(path => ctx.path === path + '.js') && ctx.method === 'GET') {
 			ctx.type = 'js';
 			ctx.set('Cache-Control', 'no-store');
 			ctx.set('X-Content-Type-Options', 'nosniff');
-			ctx.body = accountSecurityClient;
+			ctx.body = ctx.path === tenantManagementPath + '.js' ? tenantManagementClient : accountSecurityClient;
 			return;
 		}
 		// The offline modules are code, not data: they are served before the session gate
@@ -365,7 +388,7 @@ export function authGateway({ auth, origin, canReadWorkspace, matchesWorkspaceAc
 			}
 			ctx.type = 'html';
 			ctx.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; img-src data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");
-			ctx.body = accountSecurityPage({
+			ctx.body = (tenantManagement ? tenantManagementPage : accountSecurityPage)({
 				locale: localeOf(ctx),
 				scheme: ctx.cookies.get('log4stellar.color-scheme'),
 				accountId: session.user.id,
@@ -444,11 +467,18 @@ export function authGateway({ auth, origin, canReadWorkspace, matchesWorkspaceAc
 				ctx.status = 401;
 				return;
 			}
+			const expected = ctx.get('X-Log4Stellar-Account');
+			if (expected && expected !== session.user.id) {
+				ctx.status = 409;
+				ctx.body = { error: 'AccountChanged' };
+				return;
+			}
 			await serveTenantRequest(ctx, {
 				principalId: session.user.id,
 				store: tenants,
 				readWorkspaceMapping,
 				resolveWorkspaceRole: (userId, workspaceId) => resolveRole(userId, workspaceId),
+				workspacesOf,
 				isPlatformAdmin,
 				createTenantRecord,
 			});
@@ -496,17 +526,24 @@ export function authGateway({ auth, origin, canReadWorkspace, matchesWorkspaceAc
 			ctx.append('Set-Cookie', response.headers.getSetCookie());
 		}
 		if (api) {
-			ctx.state.workspaceId = defaultWorkspaceId(session.user.id);
+			const workspaces = [];
+			for (const workspace of workspacesOf(session.user.id)) {
+				if (await allowsMappedWorkspace(session.user.id, workspace.id)) {
+					workspaces.push(workspace);
+				}
+			}
+			const defaultId = defaultWorkspaceId(session.user.id);
+			ctx.state.workspaceId = workspaces.find(workspace => workspace.id === defaultId)?.id ?? workspaces[0]?.id;
 			ctx.body = {
 				remainingMs: Math.max(0, Date.parse(session.session.expiresAt) - Date.now()),
 				accountId: session.user.id,
 				workspaceId: ctx.state.workspaceId,
-				workspaces: workspacesOf(session.user.id),
+				workspaces,
 			};
 		} else if (mounted || syncing || gitting || searching || knowing || officePreviewing) {
 			// Mounted file, sync, search, knowledge and preview requests are authorized per
 			// workspace, not by the login gate.
-			const target = await resolveWorkspace(ctx, session, { defaultWorkspaceId, resolveRole, workspaces });
+			const target = await resolveWorkspace(ctx, session, { defaultWorkspaceId, resolveRole, workspaces, allowsMappedWorkspace });
 			if (!target) {
 				ctx.body = { error: 'NoPermissions' };
 				ctx.status = 403;
@@ -572,6 +609,15 @@ export function authGateway({ auth, origin, canReadWorkspace, matchesWorkspaceAc
 					return;
 				}
 				selectedWorkspaceId = requested;
+			}
+			if (workbench && selectedWorkspaceId && !await allowsMappedWorkspace(session.user.id, selectedWorkspaceId)) {
+				if (ctx.query.l4sWorkspace === undefined) {
+					redirect(ctx, tenantManagementPath);
+				} else {
+					ctx.status = 403;
+					ctx.body = { error: 'NoPermissions' };
+				}
+				return;
 			}
 			ctx.state.sessionUserId = session.user.id;
 			ctx.state.sessionUsername = session.user.username ?? session.user.name;

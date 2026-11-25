@@ -15,7 +15,8 @@
     "onCommand:log4stellar.workspace.git",
     "onCommand:log4stellar.workspace.preview",
     "onCommand:log4stellar.workspace.previewVersion",
-    "onCustomEditor:log4stellar.officePreview"
+    "onCustomEditor:log4stellar.officePreview",
+    "onCommand:log4stellar.workspace.tenants"
   ],
   "enabledApiProposals": [
     "fileSearchProvider",
@@ -49,6 +50,12 @@
         "title": "Preview document version",
         "category": "Log4Stellar",
         "icon": "$(history)"
+      },
+      {
+        "command": "log4stellar.workspace.tenants",
+        "title": "%workspace.tenants%",
+        "category": "Log4Stellar",
+        "icon": "$(organization)"
       }
     ],
     "menus": {
@@ -57,6 +64,11 @@
           "command": "log4stellar.workspace.git",
           "when": "view == workbench.explorer.fileView",
           "group": "navigation@100"
+        },
+        {
+          "command": "log4stellar.workspace.tenants",
+          "when": "view == workbench.explorer.fileView",
+          "group": "navigation@101"
         }
       ],
       "explorer/context": [
