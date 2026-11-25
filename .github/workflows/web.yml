@@ -60,7 +60,9 @@ jobs:
           node-version-file: .nvmrc
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile --ignore-scripts
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm --dir apps/web --ignore-workspace install --frozen-lockfile --ignore-scripts
 
       - name: Verify syntax, workflow and resources
         run: |
@@ -102,7 +104,9 @@ jobs:
           node-version-file: .nvmrc
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile --ignore-scripts
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm --dir apps/web --ignore-workspace install --frozen-lockfile --ignore-scripts
 
       - name: Run the Web unit tests
         run: |
@@ -166,7 +170,9 @@ jobs:
           node-version-file: .nvmrc
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile --ignore-scripts
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm --dir apps/web --ignore-workspace install --frozen-lockfile --ignore-scripts
 
       - name: Install LibreOffice for the conversion suite
         run: |
@@ -232,7 +238,9 @@ jobs:
           node-version-file: .nvmrc
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile --ignore-scripts
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm --dir apps/web --ignore-workspace install --frozen-lockfile --ignore-scripts
 
       - name: Install Playwright
         run: pnpm exec playwright install --with-deps chromium

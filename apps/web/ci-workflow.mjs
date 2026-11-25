@@ -227,6 +227,9 @@ export function validateWebWorkflow(text, { plan = ciPlan, markers = productionM
 		}
 		const commands = commandsOfJob(job);
 		const joined = commands.join('\n');
+		if (!joined.includes('pnpm --dir apps/web --ignore-workspace install --frozen-lockfile')) {
+			problems.push(`the ${id} job must install the standalone Web dependencies`);
+		}
 		for (const required of plan[id].requiredCommands) {
 			if (!joined.includes(required)) {
 				problems.push(`the ${id} job does not run: ${required}`);
