@@ -30,9 +30,9 @@ export const ciPlan = Object.freeze({
 			'pnpm install --frozen-lockfile',
 			// TAP is captured to a file so the next step can prove that every skip carries a
 			// reason; a silent skip of a gated suite is indistinguishable from a pass.
-			'node --test --test-reporter=tap --test-reporter-destination=web-tap.txt apps/web/*.test.mjs',
-			'node --test apps/web/*.test.mjs',
-			'node apps/web/verify-ci-flow.mjs --tap web-tap.txt',
+			'node --test --test-reporter=spec',
+			'--test-reporter=tap --test-reporter-destination="$REPORT_DIR/unit.tap"',
+			'node apps/web/verify-ci-flow.mjs --tap "$REPORT_DIR/unit.tap"',
 		]),
 	}),
 	integration: Object.freeze({
@@ -40,7 +40,7 @@ export const ciPlan = Object.freeze({
 		requiredCommands: Object.freeze([
 			'pnpm install --frozen-lockfile',
 			'node apps/web/verify-ci-flow.mjs --isolated-storage',
-			'LOG4STELLAR_IT=1 node --test --test-concurrency=1 apps/web/*.test.mjs',
+			'LOG4STELLAR_IT=1 node --test --test-concurrency=1',
 		]),
 	}),
 	browser: Object.freeze({
@@ -48,7 +48,7 @@ export const ciPlan = Object.freeze({
 		requiredCommands: Object.freeze([
 			'pnpm install --frozen-lockfile',
 			'pnpm exec playwright install --with-deps chromium',
-			'LOG4STELLAR_BROWSER_IT=1 node --test apps/web/*.browser.test.mjs',
+			'LOG4STELLAR_BROWSER_IT=1 node --test',
 		]),
 	}),
 });
@@ -207,6 +207,9 @@ export function validateWebWorkflow(text, { plan = ciPlan, markers = productionM
 	if (!triggers.includes('workflow_dispatch')) {
 		problems.push('the Web workflow must be startable by hand (workflow_dispatch)');
 	}
+	if (!document.on?.push?.branches?.includes('publish/log4stellar-web-*')) {
+		problems.push('the Web workflow must run on Web publication branch pushes');
+	}
 	if (document.permissions?.contents !== 'read') {
 		problems.push('the Web workflow must declare permissions: contents: read');
 	}
@@ -217,6 +220,10 @@ export function validateWebWorkflow(text, { plan = ciPlan, markers = productionM
 		if (!job) {
 			problems.push(`the Web workflow has no ${id} job`);
 			continue;
+		}
+		const upload = job.steps?.find(step => step.uses?.startsWith('actions/upload-artifact@'));
+		if (upload?.if !== 'always()' || upload.with?.path !== '${{ env.REPORT_DIR }}') {
+			problems.push(`the ${id} job must upload only its report directory even on failure`);
 		}
 		const commands = commandsOfJob(job);
 		const joined = commands.join('\n');

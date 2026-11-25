@@ -50,7 +50,7 @@ test('the committed Web workflow is valid', () => {
 
 test('the workflow runs on pull requests and can be started by hand', () => {
 	const document = parseWorkflow(workflowText);
-	assert.deepEqual(Object.keys(document.on).sort(), ['pull_request', 'workflow_dispatch']);
+	assert.deepEqual(Object.keys(document.on).sort(), ['pull_request', 'push', 'workflow_dispatch']);
 });
 
 test('every Web job is a separate job so one failure cannot hide another', () => {
@@ -76,7 +76,7 @@ test('the integration job passes --test-concurrency=1 and starts a PostgreSQL se
 	const job = document.jobs.integration;
 	assert.ok(JSON.stringify(job.steps).includes('--test-concurrency=1'));
 	assert.ok(job.services?.postgres, 'the integration job needs its own PostgreSQL');
-	assert.ok(job.services?.minio, 'the integration job needs its own object store');
+	assert.ok(job.services?.rustfs, 'the integration job needs its own object store');
 });
 
 test('every job installs node from .nvmrc, never a literal version', () => {
@@ -96,13 +96,13 @@ test('a workflow that could touch production is rejected', () => {
 });
 
 test('a workflow that names the production host is rejected', () => {
-	const poisoned = workflowText.replace('--tap web-tap.txt', '--tap https://192.0.2.233:18990/api/session');
+	const poisoned = workflowText.replace('--tap "$REPORT_DIR/unit.tap"', '--tap https://192.0.2.233:18990/api/session');
 	const { problems } = validateWebWorkflow(poisoned);
 	assert.ok(problems.some(problem => problem.includes('production host')), problems.join('\n'));
 });
 
 test('a workflow without the unit test command is rejected', () => {
-	const poisoned = workflowText.replace('node --test apps/web/*.test.mjs', 'true');
+	const poisoned = workflowText.replace('node --test --test-reporter=spec', 'true');
 	const { problems } = validateWebWorkflow(poisoned);
 	// Any of the three unit commands disappearing is drift, so the assertion is on the
 	// job's command being gone rather than on one exact sentence.
@@ -164,35 +164,28 @@ test('the gate job refuses to pass when a required job did not succeed', async (
 	}
 });
 
-test('a deliberately failing test blocks the pipeline the workflow runs', async () => {
-	// The task book's acceptance criterion is that a red test blocks the entry, not that
-	// the entry exists. So run the exact command the unit job runs, on a workspace that
-	// contains one failing test file, and require a non-zero exit.
+test('a failing test stays red while the workflow saves both reports', async () => {
 	const { execFile } = await import('node:child_process');
 	const { promisify } = await import('node:util');
-	const { mkdtemp, writeFile } = await import('node:fs/promises');
+	const { mkdir, mkdtemp, writeFile, rm } = await import('node:fs/promises');
 	const { tmpdir } = await import('node:os');
 	const run = promisify(execFile);
-	// `node --test` sets NODE_TEST_CONTEXT for the child processes it spawns. Inheriting it
-	// makes a nested `node --test` refuse to run ("being called recursively within a test
-	// file. skipping running files") and exit 0, which would make this test pass for the
-	// wrong reason.
-	const env = { ...process.env };
+	const env = { ...process.env, REPORT_DIR: 'reports' };
 	delete env.NODE_TEST_CONTEXT;
-
 	const directory = await mkdtemp(join(tmpdir(), 'l4s-ci-red-'));
-	await writeFile(join(directory, 'a-passing.test.mjs'), "import test from 'node:test';\ntest('passes', () => {});\n");
-	const passing = await run(process.execPath, ['--test', 'a-passing.test.mjs'], { cwd: directory, env }).then(() => 0, () => 1);
-	assert.equal(passing, 0);
-
-	await writeFile(join(directory, 'red.test.mjs'), "import test from 'node:test';\nimport assert from 'node:assert/strict';\ntest('fails on purpose', () => { assert.equal(1, 2); });\n");
-	let exitCode = 0;
 	try {
-		await run(process.execPath, ['--test', 'a-passing.test.mjs', 'red.test.mjs'], { cwd: directory, env });
-	} catch (error) {
-		exitCode = error.code;
+		const web = join(directory, 'apps', 'web');
+		await mkdir(web, { recursive: true });
+		await writeFile(join(web, 'passing.test.mjs'), "import test from 'node:test'; test('example success', () => {});");
+		await writeFile(join(web, 'red.test.mjs'), "import test from 'node:test'; test('example failure', () => { throw new Error('deliberate failure'); });");
+		const step = parseWorkflow(workflowText).jobs.unit.steps.find(step => step.name === 'Run the Web unit tests');
+		await assert.rejects(run('bash', ['-e', '-o', 'pipefail', '-c', step.run], { cwd: directory, env }),
+			{ code: 1 });
+		assert.match(await readFile(join(directory, 'reports', 'unit.tap'), 'utf8'), /not ok .*example failure/);
+		assert.match(await readFile(join(directory, 'reports', 'unit.log'), 'utf8'), /deliberate failure/);
+	} finally {
+		await rm(directory, { recursive: true, force: true });
 	}
-	assert.equal(exitCode, 1, 'a failing test file must make the unit command fail');
 });
 
 test('a skip with a reason is accepted and a skip without one is reported', () => {
@@ -231,7 +224,7 @@ test('the workflow inventory describes every inherited workflow', async () => {
 	const linux = rows.find(row => row.name === 'pr-linux-test.yml');
 	assert.equal(linux.reusableOnly, true);
 	const web = rows.find(row => row.name === 'web.yml');
-	assert.deepEqual(web.triggers, ['pull_request', 'workflow_dispatch']);
+	assert.deepEqual(web.triggers, ['pull_request', 'push', 'workflow_dispatch']);
 });
 
 test('the inventory summary separates entries, reusable and scheduled workflows', async () => {

@@ -17,6 +17,9 @@ name: Log4Stellar Web
 
 on:
   pull_request:
+  push:
+    branches:
+      - 'publish/log4stellar-web-*'
   workflow_dispatch:
 
 permissions:
@@ -26,7 +29,12 @@ concurrency:
   group: web-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: bash
+
 env:
+  REPORT_DIR: web-ci-reports
   # Every job installs the node the Web server actually runs on. The release marker pins
   # a major and readWebRelease() refuses a package built on another one, so this must be
   # the same `.nvmrc` the deployment uses.
@@ -40,6 +48,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup pnpm
         uses: ./.github/actions/setup-pnpm
@@ -52,20 +62,26 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
 
-      - name: Check every server module parses
+      - name: Verify syntax, workflow and resources
         run: |
-          for file in apps/web/*.mjs apps/web/*.js; do
-            node --check "$file"
-          done
+          mkdir -p "$REPORT_DIR"
+          (
+            for file in apps/web/*.mjs apps/web/*.js; do
+              node --check "$file" || exit
+            done
+            node apps/web/verify-ci-flow.mjs --static &&
+              node apps/web/verify-ci-flow.mjs --inventory &&
+              node apps/web/verify-ci-flow.mjs --resources
+          ) 2>&1 | tee "$REPORT_DIR/static.log"
 
-      - name: Verify the CI entry itself
-        run: node apps/web/verify-ci-flow.mjs --static
-
-      - name: Inventory the inherited workflows
-        run: node apps/web/verify-ci-flow.mjs --inventory
-
-      - name: Report the build resources
-        run: node apps/web/verify-ci-flow.mjs --resources
+      - name: Upload verification report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: web-static-attempt-${{ github.run_attempt }}
+          path: ${{ env.REPORT_DIR }}
+          retention-days: 14
+          if-no-files-found: warn
 
   unit:
     name: Web / Unit
@@ -74,6 +90,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup pnpm
         uses: ./.github/actions/setup-pnpm
@@ -86,15 +104,24 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
 
-      # The TAP copy is what the next step reads: it is the only place a skip reason is
-      # observable, and a gated suite that silently skipped would otherwise look green.
       - name: Run the Web unit tests
         run: |
-          node --test --test-reporter=tap --test-reporter-destination=web-tap.txt apps/web/*.test.mjs
-          node --test apps/web/*.test.mjs
+          mkdir -p "$REPORT_DIR"
+          node --test --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=tap --test-reporter-destination="$REPORT_DIR/unit.tap" \
+            apps/web/*.test.mjs 2>&1 | tee "$REPORT_DIR/unit.log"
 
       - name: Require every skip to carry a reason
-        run: node apps/web/verify-ci-flow.mjs --tap web-tap.txt
+        run: node apps/web/verify-ci-flow.mjs --tap "$REPORT_DIR/unit.tap"
+
+      - name: Upload verification report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: web-unit-attempt-${{ github.run_attempt }}
+          path: ${{ env.REPORT_DIR }}
+          retention-days: 14
+          if-no-files-found: warn
 
   integration:
     name: Web / Integration
@@ -116,22 +143,19 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
-      minio:
-        image: minio/minio:latest
+      rustfs:
+        image: rustfs/rustfs@sha256:0dff1515b3c52b5ce8c5df2263420c7f93ae1c5d07cca79e19e57cff86b84c85
         env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
+          RUSTFS_ACCESS_KEY: minioadmin
+          RUSTFS_SECRET_KEY: minioadmin
+          RUSTFS_CONSOLE_ENABLE: 'false'
         ports:
-          - 9000:9000
-        options: >-
-          --health-cmd "mc ready local || exit 1"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-        command: server /data
+          - 127.0.0.1:9000:9000
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup pnpm
         uses: ./.github/actions/setup-pnpm
@@ -144,29 +168,50 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
 
-      - name: Create the isolated bucket
+      - name: Install LibreOffice for the conversion suite
         run: |
-          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /tmp/mc
-          chmod +x /tmp/mc
-          /tmp/mc alias set local http://127.0.0.1:9000 minioadmin minioadmin
-          /tmp/mc mb --ignore-existing local/log4stellar-ci
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libreoffice-writer libreoffice-calc libreoffice-impress
 
-      # Writes the storage configuration to a temporary file and checks that it is
-      # isolated. The integration suite creates workspaces, uploads objects and deletes
-      # them; on the deployment host that would be data loss.
       - name: Prepare the isolated storage configuration
-        run: node apps/web/verify-ci-flow.mjs --isolated-storage >> "$GITHUB_ENV"
-        env:
-          LOG4STELLAR_IT_S3_ENDPOINT: http://127.0.0.1:9000
-          LOG4STELLAR_IT_S3_BUCKET: log4stellar-ci
-          LOG4STELLAR_IT_PG_HOST: 127.0.0.1
-          LOG4STELLAR_IT_PG_DATABASE: log4stellar_ci
+        run: |
+          config=$(node apps/web/verify-ci-flow.mjs --isolated-storage | sed -n 's/^export LOG4STELLAR_STORAGE_CONFIG=//p')
+          test -f "$config"
+          printf 'LOG4STELLAR_STORAGE_CONFIG=%s\n' "$config" >> "$GITHUB_ENV"
 
-      # --test-concurrency=1 is not a preference: the test role is limited to 10
-      # connections and each test file opens a pool of up to 4, so the default
-      # parallelism produces random "too many connections for role" failures.
+      - name: Create the isolated bucket
+        working-directory: apps/web
+        run: |
+          curl --fail --silent --show-error --retry 20 --retry-connrefused --retry-delay 1 http://127.0.0.1:9000/health
+          node --input-type=module <<'JS'
+          import { readFile } from 'node:fs/promises';
+          import { S3Client, CreateBucketCommand } from '@aws-sdk/client-s3';
+          const { s3 } = JSON.parse(await readFile(process.env.LOG4STELLAR_STORAGE_CONFIG, 'utf8'));
+          const client = new S3Client({ endpoint: s3.endpoint, region: s3.region, forcePathStyle: true, credentials: s3 });
+          try {
+            await client.send(new CreateBucketCommand({ Bucket: s3.bucket }));
+          } finally {
+            client.destroy();
+          }
+          JS
+
+      # The integration fixtures share a database with a limited connection budget.
       - name: Run the Web integration tests
-        run: LOG4STELLAR_IT=1 node --test --test-concurrency=1 apps/web/*.test.mjs
+        run: |
+          mkdir -p "$REPORT_DIR"
+          LOG4STELLAR_IT=1 node --test --test-concurrency=1 \
+            --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=tap --test-reporter-destination="$REPORT_DIR/integration.tap" \
+            apps/web/*.test.mjs 2>&1 | tee "$REPORT_DIR/integration.log"
+
+      - name: Upload verification report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: web-integration-attempt-${{ github.run_attempt }}
+          path: ${{ env.REPORT_DIR }}
+          retention-days: 14
+          if-no-files-found: warn
 
   browser:
     name: Web / Browser
@@ -175,6 +220,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup pnpm
         uses: ./.github/actions/setup-pnpm
@@ -191,7 +238,21 @@ jobs:
         run: pnpm exec playwright install --with-deps chromium
 
       - name: Run the browser tests
-        run: LOG4STELLAR_BROWSER_IT=1 node --test apps/web/*.browser.test.mjs
+        run: |
+          mkdir -p "$REPORT_DIR"
+          LOG4STELLAR_BROWSER_IT=1 node --test \
+            --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=tap --test-reporter-destination="$REPORT_DIR/browser.tap" \
+            apps/web/*.browser.test.mjs 2>&1 | tee "$REPORT_DIR/browser.log"
+
+      - name: Upload verification report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: web-browser-attempt-${{ github.run_attempt }}
+          path: ${{ env.REPORT_DIR }}
+          retention-days: 14
+          if-no-files-found: warn
 
   # A single check the branch protection rule can require. Without it a job that is
   # skipped, cancelled or never created reports as "not required" instead of as failed.

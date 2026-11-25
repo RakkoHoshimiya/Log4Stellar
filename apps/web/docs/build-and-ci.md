@@ -22,10 +22,10 @@
 
 | 作业 id | 名称 | 触发条件 | 用途 |
 |---|---|---|---|
-| `static` | Web / Static | PR、手动 | 语法、CI 契约、工作流清单、构建资源 |
-| `unit` | Web / Unit | PR、手动 | 纯单元测试（不需要数据库与对象存储） |
-| `integration` | Web / Integration | PR、手动 | 真实 PostgreSQL + 真实对象存储的集成测试 |
-| `browser` | Web / Browser | PR、手动 | Playwright 浏览器端到端 |
+| `static` | Web / Static | PR、Web 发布分支 push、手动 | 语法、CI 契约、工作流清单、构建资源 |
+| `unit` | Web / Unit | PR、Web 发布分支 push、手动 | 纯单元测试（不需要数据库与对象存储） |
+| `integration` | Web / Integration | PR、Web 发布分支 push、手动 | 真实 PostgreSQL + 真实对象存储的集成测试 |
+| `browser` | Web / Browser | PR、Web 发布分支 push、手动 | Playwright 浏览器端到端 |
 | `gate` | Web / Gate | 始终（`if: always()`） | 把四个结果汇聚成单一必过状态 |
 
 不变量：
@@ -35,6 +35,8 @@
 3. **gate 只在四个结果全是 `success` 时退出 0。** 其余任何组合（`failure` / `cancelled` / `skipped`）都必须打印 `::error::` 并以 1 退出。这条由 `ci-workflow.test.mjs` 把 `web.yml` 里的 shell 片段抽出来、替换 `${{ needs.*.result }}` 后真实执行来验证，而不是靠读文本。
 4. **`unit` 作业内不得出现 `LOG4STELLAR_IT`。** 出现就意味着单元作业在偷偷跑集成，用它作必过门槛会让"没跑集成"看起来像"集成通过"。
 
+向 `publish/log4stellar-web-*` 推送即可触发验证。工作流进入默认分支后也可从 Actions 手动运行。每个测试作业上传自己的报告，保留 14 天。测试失败时仍上传已生成的 TAP 和文本日志，依赖安装等准备阶段的失败可在对应作业日志查看。可从 Actions 的单次运行页面下载产物。分支保护可要求 `Web / Gate`。
+
 ## 3. 命令契约
 
 `ciPlan` 把每个作业必须执行的命令写成了数据，`compareWorkflowWithPlan()` 比对提交的 `web.yml`；少一条、顺序错、被改写成 `true`，都会在 `static` 作业里失败。
@@ -42,7 +44,7 @@
 | 作业 | 必须出现且顺序一致的命令 |
 |---|---|
 | `static` | `node --check`、`node apps/web/verify-ci-flow.mjs --static` |
-| `unit` | `pnpm install --frozen-lockfile`、TAP 采集的 `node --test --test-reporter=tap --test-reporter-destination=web-tap.txt apps/web/*.test.mjs`、普通 `node --test apps/web/*.test.mjs`、`node apps/web/verify-ci-flow.mjs --tap web-tap.txt` |
+| `unit` | 单次执行测试，同时生成 TAP 和可读日志，再用 `verify-ci-flow.mjs --tap` 校验跳过原因 |
 | `integration` | `pnpm install --frozen-lockfile`、`node apps/web/verify-ci-flow.mjs --isolated-storage`、`LOG4STELLAR_IT=1 node --test --test-concurrency=1 apps/web/*.test.mjs` |
 | `browser` | `pnpm install --frozen-lockfile`、`pnpm exec playwright install --with-deps chromium`、`LOG4STELLAR_BROWSER_IT=1 node --test apps/web/*.browser.test.mjs` |
 
@@ -165,8 +167,6 @@ node apps/web/verify-ci-flow.mjs --tap <file>        # 每条跳过都必须带�
 
 | 缺口 | 现状 | 影响 |
 |---|---|---|
-| 真实 GitHub Actions 运行 | 从未在 GitHub 上跑过这条流水线 | 容器服务、playwright 下载、pnpm store 恢复都只在本地验证过形态 |
-| 浏览器端到端 | 依赖 `playwright` 与 `@vscode/test-web`，本机未安装 | `browser` 作业在 CI 里是首次运行 |
 | 构建机 | 当前主机 swap 曾打满，构建与生产同机 | `--resources` 会在资源不足时拒绝，但没有独立构建机 |
 | xlsx 分页、Office 预览的真实桶验证 | 属于任务 05 的缺口 | 与本契约的 CI 入口无关，但会影响 `integration` 作业时长 |
 | 覆盖率门槛 | 未设置 | 新增测试只能靠 review 保证，没有数字下限 |
