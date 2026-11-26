@@ -1,5 +1,7 @@
 # Web 离线编辑契约（v1）
 
+> 历史实现契约。当前 Web 产品限定为离线只读，范围仅为当前页面已加载的内容。下文记录已有草稿与同步模块的设计，工作台未接入该能力。
+
 本文件是「Web 离线编辑」的实现契约，与 `docs/incremental-sync.md`（同步协议）并列为客户端与服务端的共同判据。凡本文件写明的存储键、状态机、状态码与顺序，实现与测试都必须一致；如需修改契约，先改本文件再改代码。
 
 配套实现：`apps/web/offline-contract.js`（常量与纯校验）、`apps/web/offline-store.js`（IndexedDB）、`apps/web/offline-coordinator.js`（重连回放）、`apps/web/offline-provider.js`（工作台适配层）、`apps/web/offline-ui.js`（界面模型）、`apps/web/offline-client.js`（浏览器入口）、`apps/web/offline-files.mjs`（模块下发）。测试在 `apps/web/offline.test.mjs`，用 `apps/web/test-support/offline-fake-idb.mjs` 驱动真实的 IndexedDB 事务语义。

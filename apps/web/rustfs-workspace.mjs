@@ -6,6 +6,7 @@ import { basename, dirname as parentPath } from 'node:path/posix';
 import { Pool } from 'pg';
 import { openRustfsBlobs } from './rustfs-blobs.mjs';
 import { ensureStorageSchema } from './sync-migrate.mjs';
+import { lockBlobGcWorkspaceForWrite } from './blob-gc-store.mjs';
 import { WorkspaceError, ifMatchHolds, normalizeWorkspacePath } from './workspace-contract.mjs';
 import {
 	conflictPath,
@@ -42,6 +43,8 @@ import {
 	countDocuments,
 	ensureSearchSchema,
 	enqueueIndexUpdate,
+	listIndexableFiles,
+	enqueueSearchBaseline,
 	queryDocuments,
 	readIndexState,
 } from './search-store.mjs';
@@ -165,6 +168,7 @@ export async function openRustfsWorkspace(workspaceId, { importing = false, crea
 			await connection.query('BEGIN');
 			if (shared) {
 				await connection.query('SELECT pg_advisory_xact_lock_shared(467209224)');
+				await lockBlobGcWorkspaceForWrite(connection, workspaceId);
 			}
 			const result = await action(connection);
 			await connection.query('COMMIT');
@@ -300,11 +304,11 @@ export async function openRustfsWorkspace(workspaceId, { importing = false, crea
 	 * Reading the stored answer first keeps the retry contract of §5.2 even when the state the
 	 * request originally ran against is gone; the in-transaction probe still decides the write.
 	 */
-	async function replayFirst(fields) {
+	async function replayFirst(fields, connection = pool) {
 		if (!fields?.idempotencyKey) {
 			return undefined;
 		}
-		return replayChanges(pool, workspaceId, fields);
+		return replayChanges(connection, workspaceId, fields);
 	}
 
 	function uploadBody(row, replayed) {
@@ -615,11 +619,10 @@ export async function openRustfsWorkspace(workspaceId, { importing = false, crea
 			return { replayed: true, restored: [], changes: answered.changes, opId: answered.opId };
 		}
 		const snapshot = await trashSnapshot(pool, ids);
-		for (let offset = 0; offset < snapshot.objects.length; offset += 8) {
-			await Promise.all(snapshot.objects.slice(offset, offset + 8).map(object => blobs.verify(object.sha256, Number(object.size_bytes))));
-		}
-
 		const result = await transaction(async connection => {
+			for (let offset = 0; offset < snapshot.objects.length; offset += 8) {
+				await Promise.all(snapshot.objects.slice(offset, offset + 8).map(object => blobs.verify(object.sha256, Number(object.size_bytes))));
+			}
 			await ensureWorkspace(connection, true);
 			if (sync?.idempotencyKey) {
 				// Same placement as the upload path: replay lookup after the row lock, before
@@ -878,6 +881,10 @@ export async function openRustfsWorkspace(workspaceId, { importing = false, crea
 					}
 				}
 				await importEntry(root, '/');
+					// Import creates a baseline rather than individual sync events. Seed the
+					// derived search queue in the same transaction as the imported entries.
+					const files = await listIndexableFiles(connection, workspaceId);
+					await enqueueSearchBaseline(connection, workspaceId, files);
 			});
 			return counts;
 		},
@@ -950,9 +957,8 @@ export async function openRustfsWorkspace(workspaceId, { importing = false, crea
 			if (revision.revision_id === original.revision_id) {
 				throw new WorkspaceError(409, 'RevisionIsCurrent');
 			}
-			await blobs.verify(revision.sha256, Number(revision.size_bytes));
-
 			return transaction(async connection => {
+				await blobs.verify(revision.sha256, Number(revision.size_bytes));
 				await ensureWorkspace(connection, true);
 				const { result, changes } = await rollbackEntries(connection, target, revision, expectedEtag, { opId: randomUUID() });
 				await maintain(connection, changes.at(-1).seq);
@@ -1078,30 +1084,17 @@ export async function openRustfsWorkspace(workspaceId, { importing = false, crea
 		 */
 		async syncPutFile({ path, mode, baseRevision, idempotencyKey, device, source, maxBytes }) {
 			const target = nonRoot(path);
-			const blob = await blobs.put(source, maxBytes);
-			// The fingerprint covers the streamed digest and size, so it can only be computed
-			// after the object store has accepted the bytes (§5.2 field order). Putting the bytes
-			// first is safe: the store is content-addressed, so a retry rewrites nothing.
-			// `mode` is part of the identity: create and save against the same digest are two
-			// different requests, and a create whose key got reused by a save must be refused
-			// instead of replayed with the create's answer.
-			const fingerprint = idempotencyFingerprint({
-				method: 'PUT', path: target, baseRevision, digest: blob.digest, size: blob.size, device, mode,
-			});
-			const answered = await replayFirst({ idempotencyKey, fingerprint });
-			if (answered) {
-				// A retry always answers 200 (§5.2 as implemented: replayed is an ordinary
-				// success carrying the stored result, whatever the first attempt's status was),
-				// and it renders the same body the first attempt produced.
-				const conflicted = answered.changes.some(row => row.kind === 'file.conflicted');
-				return {
-					status: 200,
-					body: conflicted ? conflictBody(answered.changes, true) : uploadBody(answered.changes.at(-1), true),
-				};
-			}
-			// Only now may the request be judged against current state.
-			await requiredEntry(pool, parentPath(target), directory);
 			const replayed = await transaction(async connection => {
+				// Keep the uploaded bytes and their new references inside the GC fence.
+				// The workspace row is locked after the upload, so other writers can still stream.
+				const blob = await blobs.put(source, maxBytes);
+				const fingerprint = idempotencyFingerprint({
+					method: 'PUT', path: target, baseRevision, digest: blob.digest, size: blob.size, device, mode,
+				});
+				const answered = await replayFirst({ idempotencyKey, fingerprint }, connection);
+				if (answered) return replayResponse(answered);
+
+				await requiredEntry(connection, parentPath(target), directory);
 				await ensureWorkspace(connection, true);
 				const previousAttempt = await replayChanges(connection, workspaceId, { idempotencyKey, fingerprint });
 				if (previousAttempt) {
@@ -1289,8 +1282,8 @@ export async function openRustfsWorkspace(workspaceId, { importing = false, crea
 			if (revision.revision_id === original.revision_id) {
 				throw new WorkspaceError(409, 'RevisionIsCurrent');
 			}
-			await blobs.verify(revision.sha256, Number(revision.size_bytes));
 			return transaction(async connection => {
+				await blobs.verify(revision.sha256, Number(revision.size_bytes));
 				await ensureWorkspace(connection, true);
 				const replay = idempotencyKey
 					? await replayChanges(connection, workspaceId, { idempotencyKey, fingerprint })
@@ -1466,8 +1459,8 @@ export async function openRustfsWorkspace(workspaceId, { importing = false, crea
 				return previous;
 			}
 			await check(pool);
-			const blob = await blobs.put(source, options.maxBytes);
 			return transaction(async connection => {
+				const blob = await blobs.put(source, options.maxBytes);
 				await ensureWorkspace(connection, true);
 				const previous = await check(connection);
 				const now = Date.now();

@@ -13,9 +13,12 @@
     "onFileSystem:vscode-test-web",
     "onSearch:vscode-test-web",
     "onCommand:log4stellar.workspace.git",
+    "onCommand:log4stellar.workspace.upload",
+    "onCommand:log4stellar.workspace.advancedSearch",
     "onCommand:log4stellar.workspace.preview",
     "onCommand:log4stellar.workspace.previewVersion",
     "onCustomEditor:log4stellar.officePreview",
+    "onView:log4stellar.knowledge",
     "onCommand:log4stellar.workspace.tenants"
   ],
   "enabledApiProposals": [
@@ -33,6 +36,17 @@
       }
     ],
     "commands": [
+      {
+        "command": "log4stellar.workspace.advancedSearch",
+        "title": "%workspace.advancedSearch%",
+        "category": "Log4Stellar"
+      },
+      {
+        "command": "log4stellar.workspace.upload",
+        "title": "%workspace.upload%",
+        "category": "Log4Stellar",
+        "icon": "$(cloud-upload)"
+      },
       {
         "command": "log4stellar.workspace.git",
         "title": "Git",
@@ -52,6 +66,16 @@
         "icon": "$(history)"
       },
       {
+        "command": "log4stellar.knowledge.refresh",
+        "title": "%knowledge.refresh%",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "log4stellar.knowledge.reindex",
+        "title": "%knowledge.reindex%",
+        "icon": "$(database)"
+      },
+      {
         "command": "log4stellar.workspace.tenants",
         "title": "%workspace.tenants%",
         "category": "Log4Stellar",
@@ -61,9 +85,23 @@
     "menus": {
       "view/title": [
         {
+          "command": "log4stellar.workspace.upload",
+          "when": "view == workbench.explorer.fileView",
+          "group": "navigation@99"
+        },
+        {
           "command": "log4stellar.workspace.git",
           "when": "view == workbench.explorer.fileView",
           "group": "navigation@100"
+        },
+        {
+          "command": "log4stellar.knowledge.refresh",
+          "when": "view == log4stellar.knowledge",
+          "group": "navigation"
+        },
+        {
+          "command": "log4stellar.knowledge.reindex",
+          "when": "view == log4stellar.knowledge"
         },
         {
           "command": "log4stellar.workspace.tenants",
@@ -72,6 +110,11 @@
         }
       ],
       "explorer/context": [
+        {
+          "command": "log4stellar.workspace.upload",
+          "when": "explorerResourceIsFolder && resourceScheme == vscode-test-web",
+          "group": "navigation@22"
+        },
         {
           "command": "log4stellar.workspace.preview",
           "when": "resourceScheme == vscode-test-web && resourceExtname =~ /^\\.(docx|xlsx|pptx)$/",
@@ -101,6 +144,23 @@
         ],
         "priority": "option"
       }
-    ]
+    ],
+    "viewsContainers": {
+      "secondarySidebar": [
+        {
+          "id": "log4stellarKnowledge",
+          "title": "%knowledge.title%",
+          "icon": "$(references)"
+        }
+      ]
+    },
+    "views": {
+      "log4stellarKnowledge": [
+        {
+          "id": "log4stellar.knowledge",
+          "name": "%knowledge.title%"
+        }
+      ]
+    }
   }
 }

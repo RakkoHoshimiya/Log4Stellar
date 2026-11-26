@@ -13,7 +13,7 @@ const repository = {
 const folder = { uri: { scheme: 'vscode-test-web', authority: 'mount-Owner123.notes' } };
 const plain = value => JSON.parse(JSON.stringify(value));
 
-function editor({ action, confirm = true, binding = repository, reject, fetch } = {}) {
+function editor({ action, confirm = true, binding = repository, reject, rejectAt, fetch, branchSelection } = {}) {
 	const messages = [];
 	const calls = [];
 	const picks = [];
@@ -24,7 +24,7 @@ function editor({ action, confirm = true, binding = repository, reject, fetch } 
 		window: {
 			async showQuickPick(items, options) {
 				picks.push(plain({ items, options }));
-				return picks.length === 1 ? items.find(item => item.id === action) : undefined;
+				return picks.length === 1 ? items.find(item => item.id === action) : items.find(item => item.label === branchSelection);
 			},
 			async showWarningMessage(message, options, label) {
 				messages.push(message);
@@ -42,7 +42,11 @@ function editor({ action, confirm = true, binding = repository, reject, fetch } 
 			if (endpoint === 'repository') {
 				return { bound: Boolean(binding), repository: binding };
 			}
-			if (reject) throw new Error(reject);
+			if (reject && (rejectAt === undefined || endpoint === rejectAt)) throw new Error(reject);
+				if (endpoint === 'branches') return { current: 'main', branches: [
+					{ name: 'main', commit: sha, current: true },
+					{ name: 'review', commit: remote, current: false },
+				] };
 			if (endpoint === 'log') return { commits: [{ subject: 'Update notes', commit: sha, author: 'Contributor' }] };
 			if (endpoint === 'status') return { workTree: { clean: false, entries: [{ path: 'README.md', index: 'M', workTree: '.' }] } };
 			return {};
@@ -88,6 +92,29 @@ test('Git dashboard does not push before fetch and handles a server capability d
 	const viewer = editor({ action: 'push', reject: 'NoPermissions' });
 	await viewer.open();
 	assert.match(viewer.messages.at(-1), /does not allow/);
+});
+
+test('Git dashboard switches only to a selected local branch', async () => {
+	const cancelled = editor({ action: 'switchBranch' });
+	await cancelled.open();
+	assert.deepEqual(cancelled.calls.map(call => call.endpoint), ['repository', 'branches']);
+	const switched = editor({ action: 'switchBranch', branchSelection: 'review' });
+	await switched.open();
+	assert.deepEqual(switched.picks[1].items.map(item => item.label), ['review']);
+	assert.deepEqual(switched.calls.at(-1), { endpoint: 'branch', options: { body: { name: 'review' } } });
+	assert.match(switched.messages.at(-1), /Switched to review/);
+});
+
+test('Git dashboard distinguishes a dirty tree from a changed remote branch', async () => {
+	const dirty = editor({ action: 'switchBranch', branchSelection: 'review', reject: 'WorkTreeDirty', rejectAt: 'branch' });
+	await dirty.open();
+	assert.match(dirty.messages.at(-1), /Commit or stash/);
+	const moved = editor({ action: 'push', reject: 'RemoteChanged' });
+	await moved.open();
+	assert.match(moved.messages.at(-1), /The remote branch changed/);
+	const diverged = editor({ action: 'push', reject: 'NotFastForward' });
+	await diverged.open();
+	assert.match(diverged.messages.at(-1), /would overwrite remote commits/);
 });
 
 test('Git requests use a same-origin URL and scoped workspace and account headers', async () => {

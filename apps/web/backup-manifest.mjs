@@ -169,7 +169,8 @@ export function planBackupScope(options = {}) {
 		throw new Error('The "' + scopeLimited + '" scope does not export objects; use the "' + scopeFull + '" scope.');
 	}
 
-	const members = memberContract.map(member => ({
+	const contract = options.accountStorage === 'postgres' ? memberContract.filter(member => member.name !== 'auth.sqlite') : memberContract;
+	const members = contract.map(member => ({
 		...member,
 		source: materializeSource(member.source, options),
 	}));
@@ -193,7 +194,7 @@ export function planBackupScope(options = {}) {
 		scope,
 		exportObjects,
 		members: [...members, ...deployment],
-		requiredMembers: memberContract.filter(member => member.required).map(member => member.name),
+		requiredMembers: contract.filter(member => member.required).map(member => member.name),
 		objects: {
 			required: scope === scopeFull,
 			source: {
@@ -213,7 +214,9 @@ export function planBackupScope(options = {}) {
 			remote: {
 				endpoint: options.settings?.s3?.endpoint ?? null,
 				bucket: options.settings?.s3?.bucket ?? null,
-				keyLayout: 'workspaces/<workspaceId>/sha256/<sha256>',
+				keyLayout: options.accountStorage === 'postgres'
+					? 'tenants/<tenantId>/workspaces/<workspaceId>/sha256/<sha256>'
+					: 'workspaces/<workspaceId>/sha256/<sha256>',
 			},
 		},
 		warnings: scope === scopeLimited
@@ -233,11 +236,11 @@ function materializeSource(source, options) {
 }
 
 /** The member names that must exist for a scope, recomputed from the contract. */
-export function requiredMembersFor(scope) {
+export function requiredMembersFor(scope, accountStorage) {
 	if (scope !== scopeFull && scope !== scopeLimited) {
 		throw new Error('Unknown backup scope: ' + JSON.stringify(scope));
 	}
-	return memberContract.filter(member => member.required).map(member => member.name);
+	return memberContract.filter(member => member.required && (accountStorage !== 'postgres' || member.name !== 'auth.sqlite')).map(member => member.name);
 }
 
 /** The object directory member kinds, for callers that need to tell objects from metadata. */
@@ -433,7 +436,7 @@ export async function verifyBackupManifest(backupDir, options = {}) {
 	// The required set is recomputed from the contract, never read out of the manifest:
 	// a manifest edited to delete a member must not also be able to delete the
 	// requirement for it.
-	const required = requiredMembersFor(manifest.scope);
+	const required = requiredMembersFor(manifest.scope, manifest.accountStorage);
 	const present = new Set(manifest.members.map(member => member?.name));
 	for (const name of required) {
 		if (!present.has(name)) {
@@ -624,7 +627,9 @@ async function verifyObjectEntries(directory, manifest, options, problems) {
 	const entries = [];
 	for (const entry of exportInfo.entries) {
 		const key = String(entry?.workspaceId) + '/' + String(entry?.sha256);
-		if (typeof entry?.workspaceId !== 'string' || !/^[a-z0-9][a-z0-9-]{0,62}$/.test(entry.workspaceId)
+		if ((manifest.accountStorage === 'postgres' && (typeof entry?.tenantId !== 'string' || !/^tenant-[0-9a-f]{32}$/.test(entry.tenantId)))
+			|| (manifest.accountStorage !== 'postgres' && entry?.tenantId !== undefined)
+			|| typeof entry?.workspaceId !== 'string' || !/^[a-z0-9][a-z0-9-]{0,62}$/.test(entry.workspaceId)
 			|| typeof entry.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(entry.sha256)
 			|| !Number.isSafeInteger(entry.size) || entry.size < 0) {
 			problems.push({ code: 'ObjectReferenceInvalid', message: 'The object export contains an invalid reference: ' + JSON.stringify(entry) });
@@ -688,6 +693,9 @@ async function crossCheckObjectIndex(plaintextPath, manifest, problems) {
 		problems.push({ code: 'ObjectIndexCorrupt', message: 'objects.index is not valid JSON.' });
 		return;
 	}
+	if (index?.accountStorage !== manifest.accountStorage) {
+		problems.push({ code: 'ObjectIndexMismatch', message: 'objects.index and the manifest disagree about account storage.' });
+	}
 	const listed = Array.isArray(index?.entries) ? index.entries : null;
 	if (!listed) {
 		problems.push({ code: 'ObjectIndexCorrupt', message: 'objects.index has no entry list.' });
@@ -708,7 +716,7 @@ async function crossCheckObjectIndex(plaintextPath, manifest, problems) {
 			problems.push({ code: 'ObjectIndexMismatch', message: 'objects.index lists ' + key + ', which the manifest does not.' });
 			continue;
 		}
-		if (expected.size !== entry.size || expected.storedSha256 !== entry.storedSha256 || expected.storedSize !== entry.storedSize) {
+		if (expected.tenantId !== entry.tenantId || expected.size !== entry.size || expected.storedSha256 !== entry.storedSha256 || expected.storedSize !== entry.storedSize) {
 			problems.push({ code: 'ObjectIndexMismatch', message: 'objects.index and the manifest disagree about ' + key + '.' });
 		}
 	}

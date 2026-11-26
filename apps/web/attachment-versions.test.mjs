@@ -534,3 +534,57 @@ scenario('a keep both restore names attachments without mangling them', async ()
 		}
 	});
 });
+
+scenario('a conflicting directory restore leaves the whole batch in trash', async () => {
+	await scenarioWorkspace(async ({ workspace }) => {
+		const original = Buffer.from('original nested attachment');
+		const replacement = Buffer.from('new nested attachment');
+		const note = Buffer.from('# Retain this note');
+		const directory = '/archive';
+		const nested = directory + '/nested';
+		const attachment = nested + '/slides.pptx';
+		const notePath = '/a.md';
+		assert.equal((await mkdir(workspace, directory)).status, 204);
+		assert.equal((await mkdir(workspace, nested)).status, 204);
+		assert.equal((await upload(workspace, attachment, original)).status, 201);
+		assert.equal((await upload(workspace, notePath, note)).status, 201);
+		for (const path of [notePath, directory]) {
+			assert.equal((await request(workspace, { method: 'DELETE', path, query: { recursive: '1' } })).status, 204);
+		}
+
+		const trash = async () => JSON.parse((await request(workspace, { path: '/', query: { trash: '1' } })).body);
+		const items = await trash();
+		const ids = [notePath, directory].map(path => items.find(item => item.path === path).id);
+		const batch = () => request(workspace, {
+			method: 'POST', path: '/', query: { restoreTrashBatch: '1' },
+			headers: { 'Content-Type': 'application/json' }, body: Buffer.from(JSON.stringify(ids)),
+		});
+		assert.equal((await mkdir(workspace, directory)).status, 204);
+		assert.equal((await mkdir(workspace, nested)).status, 204);
+		assert.equal((await upload(workspace, attachment, replacement)).status, 201);
+
+		assert.equal((await batch()).status, 409);
+		assert.equal((await request(workspace, { path: notePath })).status, 404);
+		assert.deepEqual((await trash()).map(item => item.id).sort(), ids.toSorted());
+		assert.deepEqual((await request(workspace, { path: attachment })).body, replacement);
+
+		assert.equal((await request(workspace, {
+			method: 'POST', path: '/', query: { restoreTrash: ids[1], keepBoth: '1' },
+		})).status, 200);
+		assert.deepEqual((await request(workspace, { path: '/archive (restored)/nested/slides.pptx' })).body, original);
+		assert.deepEqual((await request(workspace, { path: attachment })).body, replacement);
+
+		const restoredDirectory = '/archive (restored)';
+		assert.equal((await request(workspace, {
+			method: 'DELETE', path: restoredDirectory, query: { recursive: '1' },
+		})).status, 204);
+		const restoredId = (await trash()).find(item => item.path === restoredDirectory).id;
+		assert.equal((await request(workspace, {
+			method: 'POST', path: '/', query: { restoreTrashBatch: '1' },
+			headers: { 'Content-Type': 'application/json' }, body: Buffer.from(JSON.stringify([ids[0], restoredId])),
+		})).status, 200);
+		assert.deepEqual((await request(workspace, { path: notePath })).body, note);
+		assert.deepEqual((await request(workspace, { path: restoredDirectory + '/nested/slides.pptx' })).body, original);
+		assert.deepEqual(await trash(), []);
+	});
+});

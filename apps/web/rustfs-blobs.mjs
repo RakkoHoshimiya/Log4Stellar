@@ -5,9 +5,19 @@ import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { WorkspaceError } from './workspace-contract.mjs';
+import { isValidWorkspaceId, WorkspaceError } from './workspace-contract.mjs';
 
-export async function openRustfsBlobs(settings, workspaceId, spoolDirectory) {
+export function rustfsWorkspaceBlobPrefix(workspaceId, tenantId) {
+	if (!isValidWorkspaceId(workspaceId)) throw new WorkspaceError(400, 'invalid_workspace');
+	if (tenantId !== undefined && !/^tenant-[0-9a-f]{32}$/.test(tenantId)) {
+		throw new WorkspaceError(400, 'invalid_tenant');
+	}
+	const workspace = `workspaces/${workspaceId}`;
+	return (tenantId ? `tenants/${tenantId}/${workspace}` : workspace) + '/sha256/';
+}
+
+export async function openRustfsBlobs(settings, workspaceId, spoolDirectory, { tenantId } = {}) {
+	const prefix = rustfsWorkspaceBlobPrefix(workspaceId, tenantId);
 	const { endpoint, region = 'us-east-1', bucket, accessKeyId, secretAccessKey } = settings;
 	if (!endpoint || !bucket || !accessKeyId || !secretAccessKey) {
 		throw new Error('The RustFS connection requires an endpoint, bucket and access credentials.');
@@ -19,7 +29,7 @@ export async function openRustfsBlobs(settings, workspaceId, spoolDirectory) {
 		requestChecksumCalculation: 'WHEN_REQUIRED',
 		responseChecksumValidation: 'WHEN_REQUIRED',
 	});
-	const object = digest => ({ Bucket: bucket, Key: `workspaces/${workspaceId}/sha256/${digest}` });
+	const object = digest => ({ Bucket: bucket, Key: prefix + digest });
 
 	async function checkExisting(digest, size) {
 		try {

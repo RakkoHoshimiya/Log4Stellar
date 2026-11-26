@@ -9,13 +9,15 @@ import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openAuth } from './auth.mjs';
+import { openExtendedSearch } from './extended-search.mjs';
 import { authGateway } from './auth-gateway.mjs';
 import { webColorScheme } from './login-page.mjs';
 import { createLocalWorkspace, isInside } from './local-workspace.mjs';
 import { createMonitoring, defaultDiskPath } from './monitoring.mjs';
 import { createWorkspaceBackends } from './workspace-backends.mjs';
 import { createGitBackend } from './git-service.mjs';
-import { openKnowledgeStore } from './knowledge-store.mjs';
+import { openResumableUploads } from './resumable-uploads.mjs';
+import { openKnowledgeStore, readKnowledgeStorageSettings } from './knowledge-store.mjs';
 import { officePreviewEnabled } from './office-preview-contract.mjs';
 import { openOfficePreviewRuntime } from './office-preview-runtime.mjs';
 import { WorkspaceError, resolveWorkspaceId, workspaceUploadLimit, workbenchAuthority } from './workspace-contract.mjs';
@@ -56,7 +58,13 @@ const maxUploadBytes = workspaceUploadLimit();
 // tenants at all and the operator does it with the CLI — the safer default for a deployment
 // that has never thought about who should be allowed to.
 const platformAdminIds = new Set((process.env.LOG4STELLAR_PLATFORM_ADMINS || '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean));
-const auth = await openAuth({ workspaceId: storageWorkspaceId });
+const managed = process.env.LOG4STELLAR_MANAGED_TENANTS === '1';
+if (managed && backend !== 'rustfs') {
+	throw new Error('Managed tenants require the RustFS backend.');
+}
+const auth = managed
+	? await (await import('./managed-auth.mjs')).openManagedAuth(process.env, { serve: true })
+	: await openAuth({ workspaceId: storageWorkspaceId });
 if (workspacePath && (isInside(workspacePath, await realpath(auth.path)) || isInside(workspacePath, await realpath(keyPath)))) {
 	throw new Error('Keep authentication data and the TLS private key outside the notes workspace.');
 }
@@ -210,6 +218,9 @@ app.middleware.unshift(async (ctx, next) => {
 // A local directory backend serves exactly one workspace; the RustFS backend opens
 // any imported workspace on demand. Both go through the same bounded cache.
 async function openBackends() {
+	if (managed) {
+		return createWorkspaceBackends({ open: auth.managedWorkspaces.openWorkspace });
+	}
 	if (!workspacePath) {
 		const { openRustfsWorkspace } = await import('./rustfs-workspace.mjs');
 		return createWorkspaceBackends({ open: workspaceId => openRustfsWorkspace(workspaceId) });
@@ -232,7 +243,7 @@ const backends = await openBackends();
 // needs one row and must not open an object-store client to get it. A deployment without a
 // storage configuration (the local-directory backend) has no mapping, and a workspace-scoped
 // tenant request is then concealed instead of allowed.
-const tenantMapping = await openTenantMappingReader();
+const tenantMapping = managed ? null : await openTenantMappingReader();
 if (tenantMapping) {
 	// The single-workspace deployment this release inherits belongs to the legacy tenant.
 	// Binding is idempotent and never overwrites an active mapping to another tenant.
@@ -246,11 +257,17 @@ if (tenantMapping) {
 // it is off this is `undefined`, so the gateway is not given the route at all and
 // /api/v1/office-previews behaves as if the code had never shipped.
 const officePreview = await openOfficePreviewRuntime({ workspaces: backends });
+const resumableUploads = backend === 'rustfs'
+	? openResumableUploads({ ...await readKnowledgeStorageSettings(), maxUploadBytes })
+	: undefined;
+const extendedSearch = backend === 'rustfs'
+	? openExtendedSearch((await readKnowledgeStorageSettings()).postgres)
+	: undefined;
 app.middleware.unshift(authGateway({
 	...auth,
 	workspaces: backends,
 	tenants: auth.tenants,
-	readWorkspaceMapping: tenantMapping ? workspaceId => tenantMapping.read(workspaceId) : undefined,
+	readWorkspaceMapping: managed ? auth.readWorkspaceMapping : tenantMapping ? workspaceId => tenantMapping.read(workspaceId) : undefined,
 	// Creating a tenant is deployment policy, not a tenant right: the deployment names the
 	// accounts allowed to do it, and an empty list means "nobody but the operator CLI".
 	isPlatformAdmin: platformAdminIds.size === 0 ? undefined : userId => platformAdminIds.has(userId),
@@ -273,13 +290,12 @@ app.middleware.unshift(authGateway({
 			throw error;
 		}
 	},
+	resumableUploads,
+	extendedSearch,
 	openOfficePreview: officePreview && (scope => officePreview.openScope(scope)),
 }, maxUploadBytes, localeOf, webviewHost));
-if (officePreview) {
-	// The pilot runs the worker beside the web process on the same box, single concurrency.
-	// The conversion slot in PostgreSQL keeps it single even if a second one is started.
-	officePreview.startWorker?.({ workspaceId: storageWorkspaceId });
-}
+// A conversion slot in PostgreSQL limits the worker to one job at a time.
+const officeWorker = officePreview?.startWorker();
 if (allowedClients.size) {
 	app.middleware.unshift(async (ctx, next) => {
 		if (!allowedClients.has(ctx.req.socket.remoteAddress)) {
@@ -317,8 +333,17 @@ server.on('close', () => {
 	monitoring.close();
 	void backends.close().catch(error => console.error('Could not close the workspace connections', error.code));
 });
+server.on('close', () => resumableUploads?.close().catch(error => console.error('Could not close resumable uploads', error.code)));
+server.on('close', () => auth.close?.().catch(error => console.error('Could not close managed authentication', error.code)));
 server.on('close', () => tenantMapping?.close().catch(error => console.error('Could not close the tenant mapping pool', error.code)));
-server.on('close', () => officePreview?.close?.().catch(error => console.error('Could not close the Office preview pipeline', error.code)));
+server.on('close', () => {
+	void (async () => {
+		await officeWorker?.stop();
+		await officePreview?.close();
+	})().catch(error => console.error('Could not close the Office preview pipeline', error.code));
+});
 server.listen(port, listenHost, () => console.log(
 	`Log4Stellar Web Demo listening at ${auth.origin.origin}`
 	+ ` (probe timeout ${monitoringState.timeoutMs}ms, cache ${monitoringState.cacheMs}ms)`));
+
+server.on('close', () => extendedSearch?.close().catch(error => console.error('Could not close extended search', error.code)));

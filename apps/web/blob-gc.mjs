@@ -1,3 +1,4 @@
+import { holdTenantStorageReadLock, selectTenantStorage, tenantStorageProfiles } from './tenant-storage.mjs';
 import { createHash } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import { mkdir, rename, rm, stat } from 'node:fs/promises';
@@ -8,9 +9,10 @@ import {
 	DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, S3Client,
 } from '@aws-sdk/client-s3';
 
-import { createBlobGcStore } from './blob-gc-store.mjs';
+import { createBlobGcStore, readBlobGcWorkspaceCatalog } from './blob-gc-store.mjs';
 import { blobGcRetention, resolveBlobGcSettings, scopeWorkspaceId } from './blob-retention.mjs';
-import { WorkspaceError } from './workspace-contract.mjs';
+import { rustfsWorkspaceBlobPrefix } from './rustfs-blobs.mjs';
+import { isValidWorkspaceId, WorkspaceError } from './workspace-contract.mjs';
 
 /**
  * The object-storage collector (task 06, 存储对象清理).
@@ -36,26 +38,19 @@ export const blobGcModes = Object.freeze(['plan', 'review', 'apply', 'resume']);
 const digestPattern = /^[0-9a-f]{64}$/;
 
 /** The only object-key shape this collector is allowed to delete. */
-export function objectKey(workspaceId, digest) {
-	if (typeof workspaceId !== 'string' || !workspaceId) throw new WorkspaceError(400, 'invalid_workspace');
+export function objectKey(workspaceId, digest, { tenantId } = {}) {
 	if (!digestPattern.test(digest)) throw new WorkspaceError(400, 'invalid_digest');
-	return `workspaces/${workspaceId}/sha256/${digest}`;
+	return rustfsWorkspaceBlobPrefix(workspaceId, tenantId) + digest;
 }
 
-/**
- * Parses `workspaces/<workspace>/sha256/<digest>` into its parts, or null when the key
- * is not in the shape this collector owns. Unknown keys are never candidates: the
- * collector may only delete objects it can name exactly, so anything else is reported
- * as unmanaged and left alone.
- */
+/** Recognizes only canonical legacy or managed workspace blob keys. */
 export function parseObjectKey(key) {
 	if (typeof key !== 'string') return null;
-	const parts = key.split('/');
-	if (parts.length !== 4) return null;
-	const [root, workspaceId, algorithm, digest] = parts;
-	if (root !== 'workspaces' || algorithm !== 'sha256') return null;
-	if (!workspaceId || !digestPattern.test(digest)) return null;
-	return { workspaceId, digest, algorithm };
+	const match = /^(?:tenants\/(tenant-[0-9a-f]{32})\/)?workspaces\/([^/]+)\/(sha256)\/([0-9a-f]{64})$/.exec(key);
+	if (!match) return null;
+	const [, tenantId, workspaceId, algorithm, digest] = match;
+	if (!isValidWorkspaceId(workspaceId) || match[0] !== key) return null;
+	return { workspaceId, digest, algorithm, ...(tenantId ? { tenantId } : {}) };
 }
 
 /**
@@ -91,7 +86,8 @@ function errorCategory(error) {
  * makes an exact delete possible later. `deleteExact` re-reads the identity and refuses
  * to delete when it changed, so a rebuilt object survives an interrupted run.
  */
-export function openRustfsInventory(settings, workspaceId) {
+export function openRustfsInventory(settings, workspaceId, { tenantId } = {}) {
+	const prefix = rustfsWorkspaceBlobPrefix(workspaceId, tenantId);
 	const { endpoint, region = 'us-east-1', bucket, accessKeyId, secretAccessKey } = settings;
 	if (!endpoint || !bucket || !accessKeyId || !secretAccessKey) {
 		throw new WorkspaceError(500, 'blob_gc_storage_unconfigured');
@@ -102,28 +98,29 @@ export function openRustfsInventory(settings, workspaceId) {
 		requestChecksumCalculation: 'WHEN_REQUIRED',
 		responseChecksumValidation: 'WHEN_REQUIRED',
 	});
-	const prefix = `workspaces/${workspaceId}/sha256/`;
+	const key = digest => objectKey(workspaceId, digest, { tenantId });
+	const scopedVersion = version => version && tenantId ? `${tenantId}|${version}` : version;
 
 	function identity(head) {
 		// Prefer an immutable provider version id; otherwise fall back to ETag+size, which
 		// changes when the object is rewritten (a content-addressed rebuild keeps the same
 		// bytes but is a different object, and must not be deleted by an old candidate).
 		const versionId = head.VersionId ?? null;
-		if (versionId) return { version: `version:${versionId}`, versionId };
+		if (versionId) return { version: scopedVersion(`version:${versionId}`), versionId };
 		const etag = String(head.ETag ?? '').replace(/"/g, '');
-		return { version: etag ? `etag:${etag}:${head.ContentLength ?? 0}` : null, versionId: null };
+		return { version: scopedVersion(etag ? `etag:${etag}:${head.ContentLength ?? 0}` : null), versionId: null };
 	}
 
 	async function head(digest) {
 		let found;
 		try {
-			found = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: objectKey(workspaceId, digest) }));
+			found = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key(digest) }));
 		} catch (error) {
 			if (error.$metadata?.httpStatusCode === 404) return null;
 			throw error;
 		}
 		return {
-			key: objectKey(workspaceId, digest),
+			key: key(digest),
 			digest,
 			sizeBytes: Number(found.ContentLength ?? 0),
 			lastModifiedMs: found.LastModified ? found.LastModified.getTime() : null,
@@ -143,7 +140,7 @@ export function openRustfsInventory(settings, workspaceId) {
 			let unmanaged = 0;
 			for (const item of response.Contents ?? []) {
 				const parsed = parseObjectKey(item.Key);
-				if (!parsed || parsed.workspaceId !== workspaceId) {
+				if (!parsed || parsed.workspaceId !== workspaceId || parsed.tenantId !== tenantId) {
 					unmanaged += 1;
 					continue;
 				}
@@ -153,7 +150,7 @@ export function openRustfsInventory(settings, workspaceId) {
 					digest: parsed.digest,
 					sizeBytes: Number(item.Size ?? 0),
 					lastModifiedMs: item.LastModified ? item.LastModified.getTime() : null,
-					version: etag ? `etag:${etag}:${item.Size ?? 0}` : null,
+					version: scopedVersion(etag ? `etag:${etag}:${item.Size ?? 0}` : null),
 				});
 			}
 			return {
@@ -163,6 +160,9 @@ export function openRustfsInventory(settings, workspaceId) {
 			};
 		},
 
+		ownsVersion: version => tenantId
+			? version?.startsWith(`${tenantId}|`) === true
+			: !version?.startsWith('tenant-'),
 		head,
 
 		async deleteExact(digest, version) {
@@ -174,7 +174,7 @@ export function openRustfsInventory(settings, workspaceId) {
 			try {
 				await client.send(new DeleteObjectCommand({
 					Bucket: bucket,
-					Key: objectKey(workspaceId, digest),
+					Key: key(digest),
 					...(current.versionId ? { VersionId: current.versionId } : {}),
 				}));
 			} catch (error) {
@@ -188,7 +188,7 @@ export function openRustfsInventory(settings, workspaceId) {
 		async copyTo(path, digest, sizeBytes) {
 			await mkdir(dirname(path), { recursive: true, mode: 0o700 });
 			const response = await client.send(new GetObjectCommand({
-				Bucket: bucket, Key: objectKey(workspaceId, digest),
+				Bucket: bucket, Key: key(digest),
 			}));
 			if (!response.Body) throw new WorkspaceError(502, 'blob_gc_empty_body');
 			const hash = createHash('sha256');
@@ -264,20 +264,18 @@ export function createBlobGc(options) {
 		return normalizeInventory(options.inventory, settings, workspaceId);
 	}
 
+	const opened = new Map();
+
 	function closeInventories() {
-		for (const workspaceId of new Set(opened)) {
-			try {
-				inventoryFor(workspaceId).close?.();
-			} catch {
-				// Closing must never fail a run that already finished its work.
-			}
+		for (const source of new Set(opened.values())) {
+			try { source.close?.(); } catch { /* A completed run must remain reportable. */ }
 		}
+		opened.clear();
 	}
-	const opened = [];
 
 	function inventory(workspaceId) {
-		opened.push(workspaceId);
-		return inventoryFor(workspaceId);
+		if (!opened.has(workspaceId)) opened.set(workspaceId, inventoryFor(workspaceId));
+		return opened.get(workspaceId);
 	}
 
 	/**
@@ -308,18 +306,20 @@ export function createBlobGc(options) {
 							protectedCount += 1;
 							continue;
 						}
+						const currentObject = source.ownsVersion ? await source.head(object.digest) : object;
+						if (!currentObject || (source.ownsVersion && !currentObject.version)) continue;
 						candidateCount += 1;
-						candidateBytes += object.sizeBytes ?? 0;
+						candidateBytes += currentObject.sizeBytes ?? 0;
 						// Grace starts at the later of "we first saw it" and "the store says it
 						// was last written": an object uploaded a minute ago is not an orphan.
-						const lastWrite = object.lastModifiedMs ?? startedMs;
+						const lastWrite = currentObject.lastModifiedMs ?? startedMs;
 						const firstSeenMs = startedMs;
 						const eligibleAfterMs = Math.max(firstSeenMs, lastWrite) + policy.graceMs;
 						await store.observeCandidate({
 							workspaceId,
 							digest: object.digest,
-							objectVersion: object.version ?? null,
-							sizeBytes: object.sizeBytes ?? 0,
+							objectVersion: currentObject.version ?? null,
+							sizeBytes: currentObject.sizeBytes ?? 0,
 							runId: run.runId,
 							reason: 'unreferenced',
 							firstSeenMs,
@@ -536,19 +536,34 @@ export function createBlobGc(options) {
 	 */
 	async function sweepCandidate(scope, candidate, context = {}) {
 		const workspaceId = candidate.workspaceId ?? scopeWorkspaceId(scope);
+		if (!isValidWorkspaceId(workspaceId) || !digestPattern.test(candidate.digest)) {
+			throw new WorkspaceError(400, 'invalid_candidate');
+		}
+		const sweep = () => sweepUnderFence(scope, candidate, context);
+		return store.withWorkspaceLock ? store.withWorkspaceLock(workspaceId, sweep) : sweep();
+	}
+
+	async function sweepUnderFence(scope, candidate, context) {
+		const workspaceId = candidate.workspaceId ?? scopeWorkspaceId(scope);
 		const digest = candidate.digest;
 		const nowMs = context.nowMs ?? now();
 		const dryRun = context.dryRun ?? settings.apply !== true;
 		const run = context.run ?? null;
 		if (!workspaceId || !digest) throw new WorkspaceError(400, 'invalid_candidate');
 		const source = inventory(workspaceId);
-		const lockKey = `${workspaceId}:${digest}`;
 
 		const current = await store.findCandidate(workspaceId, digest);
 		if (!current) return { action: 'cancelled', reason: 'candidate-not-found' };
 		const resuming = context.resuming === true || current.state === 'deleting';
 		if (!resuming && current.state !== 'eligible') {
 			return { action: 'cancelled', reason: `state:${current.state}` };
+		}
+		if (source.ownsVersion && !source.ownsVersion(current.objectVersion)) {
+			await store.transitionCandidate({
+				workspaceId, digest, from: ['eligible', 'deleting'], to: 'cancelled',
+				reason: 'object-namespace-changed', updatedMs: nowMs,
+			});
+			return { action: 'cancelled', reason: 'object-namespace-changed' };
 		}
 		const head = await source.head(digest);
 
@@ -760,17 +775,28 @@ async function cliMain(argv = process.argv.slice(2)) {
 	const [verb = 'plan', target, ...extra] = argv;
 	if (extra.length) throw new WorkspaceError(400, 'blob_gc_usage');
 	const storage = JSON.parse(await readFile(configPath, 'utf8'));
+	const profiles = tenantStorageProfiles(storage);
 	const defaultScope = settings.workspaces.length > 0
 		? `workspace:${settings.workspaces[0]}`
 		: 'all';
 	const scope = verb === 'resume' ? null : (target ?? defaultScope);
 	const pool = new Pool({ connectionTimeoutMillis: 5000, max: 4, ...storage.postgres });
-	const collector = createBlobGc({
-		store: createBlobGcStore(pool),
-		inventory: openRustfsInventory(storage.s3, scope ? scopeWorkspaceId(scope) ?? '' : ''),
-		settings,
-	});
+	let collector;
+	let catalogLease;
 	try {
+		if (process.env.LOG4STELLAR_MANAGED_TENANTS === '1') catalogLease = await holdTenantStorageReadLock(pool);
+		const workspaceCatalog = await readBlobGcWorkspaceCatalog(pool, {
+			managed: process.env.LOG4STELLAR_MANAGED_TENANTS === '1',
+		});
+		collector = createBlobGc({
+			store: createBlobGcStore(pool, { workspaceCatalog }),
+			inventory(_settings, workspaceId) {
+				if (!workspaceCatalog.has(workspaceId)) throw new WorkspaceError(404, 'blob_gc_workspace_not_found');
+				const tenantId = workspaceCatalog.get(workspaceId);
+				return openRustfsInventory(selectTenantStorage(storage.s3, profiles, tenantId), workspaceId, { tenantId });
+			},
+			settings,
+		});
 		let summary;
 		if (verb === 'plan') summary = await collector.plan(scope);
 		else if (verb === 'review') summary = await collector.review(scope);
@@ -781,7 +807,8 @@ async function cliMain(argv = process.argv.slice(2)) {
 		} else throw new WorkspaceError(400, 'blob_gc_unknown_mode');
 		console.log(JSON.stringify({ ...summary, summary: describeBlobGcSummary(summary) }, null, 2));
 	} finally {
-		collector.close();
+		collector?.close();
+		catalogLease?.release(true);
 		await pool.end();
 	}
 }

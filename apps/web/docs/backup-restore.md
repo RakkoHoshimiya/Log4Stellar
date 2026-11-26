@@ -43,6 +43,8 @@
 
 **必需成员的集合从常量重算，不读清单**（`requiredMembersFor(scope)` 读 `memberContract`）。理由：如果集合来自清单，那么「改清单删掉一个成员」与「删掉对该成员的要求」可以同时完成，校验会一路绿灯。从常量重算让修改清单变成一次可检测的篡改。
 
+托管租户模式使用 PostgreSQL 同时保存账号、会话、授权和笔记元数据。设置 `LOG4STELLAR_MANAGED_TENANTS=1` 后，归档的 `log4stellar.sql` 包含两类数据。身份签名根、Git 密钥及对象清单仍独立加密，托管归档的必需成员为 `secret`、`git-secret`、`log4stellar.sql` 和 `objects.index`。
+
 ### 2.2 部署配置成员
 
 部署配置文件不是每个部署都相同，所以它们由调用方指定，且 `required: false`：
@@ -330,7 +332,7 @@ node apps/web/backup-schedule.mjs daemon \
 
 ### 11.1 真实的 RustFS 恢复演练仍是欠账
 
-本次演练用的是本机 `docker run minio/minio` 起的独立 S3，不是生产 RustFS 集群本身。生产账号 `user_agent` 对 `192.0.2.9:9000` **只能读**：`HeadBucket` 返回 200，`CreateBucket` / `DeleteBucket` 返回 `403 AccessDenied`。因此**无法用生产凭据开隔离桶**。
+本次演练用的是本机 `docker run minio/minio` 起的独立 S3，不是生产 RustFS 集群本身。生产账号 `backup_reader` 对 `192.0.2.20:9000` **只能读**：`HeadBucket` 返回 200，`CreateBucket` / `DeleteBucket` 返回 `403 AccessDenied`。因此**无法用生产凭据开隔离桶**。
 
 要在真 RustFS 上做恢复演练，需要下列任一条件先成立：
 
@@ -361,3 +363,12 @@ node apps/web/backup-schedule.mjs daemon \
 ### 11.5 备份大小
 
 生产数据现在是 1033 个对象 / 272 MB。全量备份每天一次、保留 7 份 = 约 2 GB。对象是不可变内容寻址的，理论上可以做增量（只备份新增 digest），本次未实现——按当前体量，全量的简单性与可靠性更值得。
+
+
+## 正式环境定时运行
+
+用服务管理器每天触发 `backup-schedule.mjs run-once --force`。备份进程应加载与 Web 服务相同的托管模式、认证目录和存储配置，并通过 `LOG4STELLAR_BACKUP_KEY_FILE` 读取权限为 0600 的密钥。使用独立的备份目录和调度状态目录。备份进程应使用当前发布包里的工具，以保持数据契约一致。
+
+systemd 采用用户级 oneshot 服务和持久化 timer。日历时间由部署方选定。使用 `systemctl --user start log4stellar-backup.service` 验证服务能从真实账号创建备份。用 `systemctl --user list-timers log4stellar-backup.timer` 核对下一次运行时间。使用 `journalctl --user -u log4stellar-backup.service` 查看执行结果，失败由 `OnFailure` 写入本地告警日志。可用 `backup-schedule.mjs status --state-dir=<state-dir>` 核对最近一次成功和失败。
+
+恢复演练读取已经自校验的正式归档，恢复到独立 PostgreSQL 数据库和 RustFS 桶，逐对象读回校验并检查账号权限与文件版本。首轮跨模式回退时，停用托管定时器，由旧环境备份配置接管。异机保留和外部告警渠道需要单独配置。

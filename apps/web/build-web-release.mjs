@@ -12,7 +12,7 @@ const repo = resolve(app, '../..');
 const git = promisify(execFile);
 const serverFiles = [
 	'account-security-client.js', 'account-security-ddl.mjs', 'account-security-page.mjs',
-	'account-security-runtime.mjs', 'account-security.mjs',
+	'account-security-runtime.mjs', 'postgres-account-security.mjs', 'account-security.mjs',
 	'audit-supply-chain.mjs',
 	'auth-gateway.mjs', 'auth.mjs', 'backup-cipher.mjs', 'backup-data.mjs',
 	'backup-manifest.mjs', 'backup-schedule.mjs',
@@ -39,18 +39,20 @@ const serverFiles = [
 	'office-preview-migrate.mjs', 'office-preview-runner.mjs', 'office-preview-runtime.mjs',
 	'office-preview-schema.sql', 'office-preview-service.mjs', 'office-preview-store.mjs',
 	'office-preview-worker.mjs',
-	'package.json', 'pnpm-lock.yaml', 'restore-backup.mjs', 'restore-backup-objects.mjs',
+	'package.json', 'pnpm-lock.yaml', 'resumable-uploads.mjs', 'uploads-page.mjs', 'uploads-client.js', 'restore-backup.mjs', 'restore-backup-objects.mjs',
 	'rustfs-blobs.mjs', 'rustfs-workspace.mjs', 'search-contract.mjs', 'search-files.mjs',
-	'search-indexer.mjs', 'search-schema.sql', 'search-store.mjs', 'serve-demo.mjs', 'session-client.js',
+	'extended-search.mjs', 'extended-search-page.mjs', 'extended-search-client.js',
+	'extract-office-text.py', 'search-format-sandbox.sh', 'extract-pdf-text.mjs', 'search-indexer.mjs', 'search-schema.sql', 'search-store.mjs', 'serve-demo.mjs', 'session-client.js',
 	// The supply-chain audit is an operator gate: it must run against the deployed
 	// tree, so both the checks and the CLI ship with the release.
 	'supply-chain.mjs',
 	'sync-contract.mjs', 'sync-files.mjs', 'sync-migrate.mjs', 'sync-schema.sql', 'sync-store.mjs',
+	'create-managed-account.mjs', 'managed-auth.mjs', 'managed-workspaces.mjs', 'managed-workspaces.sql', 'managed-workspace-files.mjs',
 	'tenant-management-page.mjs', 'tenant-management-client.js',
 	'tenant-contract.mjs', 'tenant-files.mjs', 'tenant-migrate.mjs', 'tenant-schema.sql',
-	'tenant-service.mjs', 'tenant-store.mjs',
+	'tenant-service.mjs', 'tenant-store.mjs', 'tenant-storage.mjs',
 	'verify-web-release.mjs', 'web-release.mjs', 'workspace-access.mjs',
-	'workspace-backends.mjs', 'workspace-contract.mjs', 'workspace-files.mjs',
+	'workspace-backends.mjs', 'workspace-contract.mjs', 'workspace-files.mjs', 'workspace-move.mjs',
 	'workspace-members.mjs', 'workspace-schema.sql',
 ];
 const extensions = {

@@ -692,3 +692,20 @@ CREATE INDEX IF NOT EXISTS git_checkpoints_created
 前端使用现有会话和工作区身份请求服务器，凭证由服务端管理。回滚到尚无 Git 前端的包后，该命令消失，已有关联表保留。
 
 运行 `node --test apps/web/git-ui.test.mjs apps/web/git-contract.test.mjs apps/web/git-files.test.mjs apps/web/git-repository.test.mjs` 进行离线回归。真实 Git 测试只访问各用例创建的临时仓库。
+
+## Web 面板验收
+
+从资源管理器的 Git 图标或命令面板进入 Git。用已经绑定的工作树验证以下操作。
+
+1. 拉取远端引用，确认工作树当前提交保持一致，远端跟踪引用已刷新。
+2. 使用「切换分支」选择另一个本地分支，重新打开 Git 面板确认分支和显示的提交。工作树有未提交改动时，界面提示提交或暂存，现有内容保留。
+3. 切回配置的远端分支，拉取并确认当前提交后推送。核对远端分支指向同一提交。
+4. 由第二个工作树推进远端，再从旧的拉取记录尝试推送。界面提示远端已变更，远端提交保留。再次拉取后，分叉的历史仍由 Git 非快进检查保护。
+
+部署方通过 `LOG4STELLAR_GIT_WORKSPACE_ROOTS` 给验收工作区分配专用目录，并由 Owner 调用 `PUT /git/v1/repository` 绑定。可用允许根内的裸仓库作为测试远端。正式 GitHub 仓库使用配置的 HTTPS 或 SSH 远端及相应凭据。
+
+## HTTPS 与 SSH 环境配置
+
+- HTTPS 默认使用系统信任的 CA。内网 Git 使用专用 CA 时，设置 LOG4STELLAR_GIT_HTTPS_CA_FILE 指向受保护的 CA 文件。Git Token 仍从工作区凭据入口配置。需要指定登录名的 Git 服务可通过 LOG4STELLAR_GIT_HTTPS_USERNAME 配置，默认用户名为 x-access-token。
+- SSH 工作区使用独立 SSH 私钥。部署时通过可信渠道取得 Git 服务主机公钥，写入受保护的 known_hosts，再把 LOG4STELLAR_GIT_SSH_KNOWN_HOSTS 指向该文件。已配置此项时，服务器拒绝未登记或已变更的主机密钥。
+- Log4Stellar 的代码提交、分支和标签以 GitHub 远端为准，本地 Git 工作树用于开发。RustFS 存储笔记和附件的文件版本。

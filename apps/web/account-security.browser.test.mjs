@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { openAuth } from './auth.mjs';
+import { openManagedAuth } from './managed-auth.mjs';
 import { authGateway } from './auth-gateway.mjs';
 
 const enabled = process.env.LOG4STELLAR_BROWSER_IT === '1';
@@ -37,7 +38,9 @@ function codeFor(base32, now = Date.now()) {
 // The reason is explicit so the CI skip check can prove this suite was deliberately
 // skipped instead of silently absent.
 const skipReason = enabled ? false : 'set LOG4STELLAR_BROWSER_IT=1 to run the browser integration tests';
-test('account-security browser: change credentials, manage devices, set up and recover MFA', { skip: skipReason, timeout: 60_000 }, async () => {
+const managed = process.env.LOG4STELLAR_MANAGED_IT === '1';
+
+test('account-security browser: change credentials, manage devices, set up and recover MFA', { skip: skipReason, timeout: 60_000 }, async testContext => {
 	const { chromium } = await import(process.env.LOG4STELLAR_PLAYWRIGHT_MODULE || 'playwright');
 	const Koa = createRequire(require.resolve('@vscode/test-web'))('koa');
 	const directory = await mkdtemp(join(tmpdir(), 'l4s-auth-browser-'));
@@ -58,15 +61,30 @@ test('account-security browser: change credentials, manage devices, set up and r
 		process.env.LOG4STELLAR_AUTH_DIR = directory;
 		process.env.LOG4STELLAR_WEB_ORIGIN = origin;
 		const workspace = 'fixture';
-		auth = await openAuth({ workspaceId: workspace });
+		if (managed) {
+			const config = JSON.parse(await readFile(process.env.LOG4STELLAR_STORAGE_CONFIG, 'utf8'));
+			assert.equal(config.postgres.host, '127.0.0.1');
+			assert.equal(config.postgres.database, 'managed_acceptance');
+		}
+		auth = managed ? await openManagedAuth() : await openAuth({ workspaceId: workspace });
 		const username = 'browser_fixture';
 		const password = randomBytes(12).toString('hex');
 		const newPassword = randomBytes(12).toString('hex');
-		await auth.createAccount(username, password);
+		const accountId = await auth.createAccount(username, password);
+		if (managed) {
+			const store = auth.managedWorkspaces;
+			await store.bootstrapPlatformAdmin(accountId);
+			const tenant = await store.createTenantWithAdmin(accountId, {
+				name: 'Fixture', initialAdminId: accountId, requestId: 'browser-tenant',
+			});
+			await store.createTenantWorkspace(accountId, tenant.tenantId, {
+				name: 'Notes', initialOwnerId: accountId, requestId: 'browser-workspace',
+			});
+		}
 		app.use(authGateway(auth, 1024, () => 'en'));
 		app.use(ctx => { ctx.body = 'Workspace fixture'; });
 
-		browser = await chromium.launch({ headless: true });
+		browser = await chromium.launch({ headless: true, channel: process.env.LOG4STELLAR_CHROME_CHANNEL });
 		async function userPage() {
 			const context = await browser.newContext({ ignoreHTTPSErrors: true });
 			const page = await context.newPage();
@@ -114,7 +132,9 @@ test('account-security browser: change credentials, manage devices, set up and r
 		assert.equal(originalCodes.length, 10);
 		const seed = await page.locator('#key').textContent();
 		assert.match(seed, /^[A-Z2-7]+$/);
-		await page.locator('#confirm [name=code]').fill(codeFor(seed));
+		const enrolledAt = Date.now();
+		const enrolledCode = codeFor(seed, enrolledAt);
+		await page.locator('#confirm [name=code]').fill(enrolledCode);
 		await page.locator('#confirm button').click();
 		await page.locator('#factorState[data-enabled=true]').waitFor();
 		await page.reload();
@@ -128,6 +148,39 @@ test('account-security browser: change credentials, manage devices, set up and r
 		await other.locator('[name=code]').fill(originalCodes[0]);
 		await other.locator('button[type=submit]').click();
 		await other.waitForURL(origin + '/');
+
+		const recoveryReplay = await userPage();
+		await signIn(recoveryReplay, newPassword);
+		await recoveryReplay.waitForURL(origin + '/login?twofactor=1');
+		await recoveryReplay.locator('[name=code]').fill(originalCodes[0]);
+		const [replayResponse] = await Promise.all([
+			recoveryReplay.waitForResponse(response => response.url() === origin + '/login'
+				&& response.request().method() === 'POST'),
+			recoveryReplay.locator('button[type=submit]').click(),
+		]);
+		assert.equal(replayResponse.status(), 401);
+		await recoveryReplay.getByText('That code is not valid. Try again.').waitFor();
+		await recoveryReplay.context().close();
+
+		if (managed) {
+			// Move the test clock exactly one step while keeping real browser timers.
+			testContext.mock.timers.enable({ apis: ['Date'], now: enrolledAt + 30_000 });
+			const validCode = codeFor(seed);
+			const verifier = await userPage();
+			const replay = await userPage();
+			for (const candidate of [verifier, replay]) {
+				await signIn(candidate, newPassword);
+				await candidate.waitForURL(origin + '/login?twofactor=1');
+				assert.equal((await candidate.context().request.get(origin + '/api/v2/management/tenants')).status(), 403);
+			}
+			const verify = async candidate => (await candidate.context().request.post(
+				origin + '/api/account-security/two-factor/verify',
+				{ headers: { Origin: origin }, data: { code: validCode } },
+			)).status();
+			assert.deepEqual((await Promise.all([verify(verifier), verify(replay)])).sort(), [200, 401]);
+			await verifier.context().close();
+			await replay.context().close();
+		}
 
 		const rotate = page.locator('#rotate');
 		await rotate.locator('[name=password]').fill(newPassword);
@@ -149,7 +202,8 @@ test('account-security browser: change credentials, manage devices, set up and r
 		assert.equal(await other.evaluate(() => fetch('/api/session').then(response => response.status)), 401);
 	} finally {
 		await browser?.close();
-		auth?.database.close();
+		await auth?.close?.();
+		auth?.database?.close();
 		if (server?.listening) {
 			await new Promise(resolve => server.close(resolve));
 		}

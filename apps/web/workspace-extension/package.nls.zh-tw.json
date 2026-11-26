@@ -1,7 +1,12 @@
 {
+  "knowledge.title": "知識關聯",
+  "knowledge.refresh": "重新整理知識關聯",
+  "knowledge.reindex": "更新知識索引",
   "workspace.tenants": "租戶管理",
   "workspace.displayName": "Log4Stellar 工作區",
   "workspace.preview": "預覽文件",
   "workspace.previewVersion": "預覽文件版本",
-  "workspace.officeEditor": "Log4Stellar Office 預覽"
+  "workspace.officeEditor": "Log4Stellar Office 預覽",
+  "workspace.upload": "上傳附件",
+  "workspace.advancedSearch": "歷史版本與附件搜尋"
 }

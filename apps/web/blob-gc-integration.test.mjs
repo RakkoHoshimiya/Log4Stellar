@@ -1,15 +1,23 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { Pool } from 'pg';
+import { betterAuth } from 'better-auth';
+import { getMigrations } from 'better-auth/db/migration';
+import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 
-import { createBlobGc } from './blob-gc.mjs';
-import { createBlobGcStore, migrateBlobGcSchema } from './blob-gc-store.mjs';
+import { createBlobGc, objectKey, openRustfsInventory } from './blob-gc.mjs';
+import { createBlobGcStore, lockBlobGcWorkspaceForWrite, migrateBlobGcSchema, readBlobGcWorkspaceCatalog } from './blob-gc-store.mjs';
 import { blobGcRetention, workspaceScope } from './blob-retention.mjs';
+import { openManagedWorkspaces } from './managed-workspaces.mjs';
 import { openDirectoryInventory } from './test-support/directory-inventory.mjs';
 
 // G01–G04 from 06-存储对象清理.md, against real PostgreSQL and a directory-backed object
@@ -56,8 +64,53 @@ function clock(startMs = Date.now()) {
 	};
 }
 
+// Opt in only with a disposable loopback database and a dedicated RustFS bucket.
+const realRustfs = process.env.LOG4STELLAR_GC_RUSTFS_IT === '1';
+
+function assertDisposableRustfs({ s3, postgres }) {
+	assert.equal(postgres.host, '127.0.0.1');
+	assert.equal(postgres.database, 'managed_acceptance');
+	assert.equal(new URL(s3.endpoint).hostname, '127.0.0.1');
+	assert.equal(s3.bucket, 'l4s-gc-test-acceptance');
+}
+
+function openRustfsFixture({ s3 }, workspaceId, tenantId) {
+	const inventory = openRustfsInventory(s3, workspaceId, { tenantId });
+	const { endpoint, bucket, region, accessKeyId, secretAccessKey } = s3;
+	const client = new S3Client({
+		endpoint, region, forcePathStyle: true, credentials: { accessKeyId, secretAccessKey },
+		requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED',
+	});
+	const uploaded = new Set();
+	const object = digest => ({ Bucket: bucket, Key: objectKey(workspaceId, digest, { tenantId }) });
+	return {
+		...inventory,
+		async put(digest, bytes) {
+			uploaded.add(digest);
+			await client.send(new PutObjectCommand({ ...object(digest), Body: bytes, Metadata: { sha256: digest } }));
+		},
+		async bytes(digest) {
+			const { Body } = await client.send(new GetObjectCommand(object(digest)));
+			return Buffer.from(await Body.transformToByteArray());
+		},
+		async digests() {
+			const { objects, cursor } = await inventory.list(null);
+			assert.equal(cursor, null);
+			return objects.map(({ digest }) => digest);
+		},
+		async close() {
+			try {
+				await Promise.all([...uploaded].map(digest => client.send(new DeleteObjectCommand(object(digest)))));
+			} finally {
+				inventory.close();
+				client.destroy();
+			}
+		},
+	};
+}
+
 /** Everything a scenario needs: a pool, a workspace id, an inventory and its settings. */
-async function scenario(work) {
+async function scenario(work, openInventory = (settings, id) => openDirectoryInventory(settings, id, spoolDirectory())) {
 	const settings = storageConfig();
 	const workspaceId = 'l4s-gc-' + randomUUID().replace(/-/g, '').slice(0, 12);
 	const pool = new Pool({ connectionTimeoutMillis: 5000, max: 4, ...settings.postgres });
@@ -66,7 +119,7 @@ async function scenario(work) {
 		await migrateBlobGcSchema(pool);
 		await pool.query('INSERT INTO log4stellar.storage_workspaces (id, created_ms) VALUES ($1, $2)',
 			[workspaceId, Date.now()]);
-		const inventory = await openDirectoryInventory(settings, workspaceId, spoolDirectory());
+		const inventory = await openInventory(settings, workspaceId);
 		const store = createBlobGcStore(pool, { migrate: false });
 		try {
 			await work({ store, inventory, pool, workspaceId, settings, recoveryDirectory });
@@ -456,7 +509,7 @@ test('G03b: resume completes an interrupted delete and stays idempotent when it 
 // G04 — a deleted sample can be restored byte-for-byte and every protected object is intact
 // ---------------------------------------------------------------------------------------
 
-test('G04: the deleted object round-trips from the recovery copy, and protected bytes are unchanged', { skip }, async () => {
+async function verifyRemovalAndRecovery(openInventory) {
 	await scenario(async ({ store, inventory, pool, workspaceId, recoveryDirectory }) => {
 		const time = clock();
 		const { objects, bytes } = await seedMixedWorkspace({ store, inventory, pool, workspaceId, time });
@@ -473,8 +526,11 @@ test('G04: the deleted object round-trips from the recovery copy, and protected 
 		const summary = await collector.apply(workspaceScope(workspaceId));
 		assert.equal(summary.deleted, 1);
 		assert.equal(summary.deletedBytes, bytes.orphan.length);
-		assert.equal(inventory.calls.delete, 1);
-		assert.equal(inventory.calls.copy, 1);
+		assert.equal(await inventory.head(objects.orphan), null);
+		if (inventory.calls) {
+			assert.equal(inventory.calls.delete, 1);
+			assert.equal(inventory.calls.copy, 1);
+		}
 		assert.ok(!(await inventory.digests()).includes(objects.orphan));
 
 		// Every protected object is still readable and byte-identical.
@@ -508,8 +564,128 @@ test('G04: the deleted object round-trips from the recovery copy, and protected 
 		assert.equal(Number(runs[0].deleted_bytes), bytes.orphan.length);
 		assert.equal(runs[0].dry_run, false);
 		assert.equal(runs[0].state, 'completed');
+	}, openInventory);
+}
+
+test('G04: the deleted object round-trips from the recovery copy, and protected bytes are unchanged', { skip },
+	() => verifyRemovalAndRecovery());
+
+test('G04: real RustFS delete and restore preserve all referenced bytes',
+	{ skip: skip || (!realRustfs && 'set LOG4STELLAR_GC_RUSTFS_IT=1 with the dedicated RustFS fixture') },
+	async () => {
+		assertDisposableRustfs(storageConfig());
+		await verifyRemovalAndRecovery(openRustfsFixture);
 	});
-});
+
+test('managed RustFS cleanup protects other namespaces and a concurrent writer before deleting and restoring',
+	{ skip: skip || (!realRustfs && 'set LOG4STELLAR_GC_RUSTFS_IT=1 with the dedicated RustFS fixture') },
+	async () => {
+		assertDisposableRustfs(storageConfig());
+		await scenario(async ({ pool, workspaceId, settings, recoveryDirectory }) => {
+			const auth = betterAuth({
+				baseURL: 'https://127.0.0.1', database: pool,
+				secret: 'disposable-integration-fixture-no-production-data',
+			});
+			await (await getMigrations(auth.options)).runMigrations();
+			await openManagedWorkspaces(pool);
+			const tenant = () => 'tenant-' + randomUUID().replaceAll('-', '');
+			const [tenantId, otherTenantId] = [tenant(), tenant()];
+			await pool.query("INSERT INTO log4stellar.managed_tenants (id, name) VALUES ($1, 'Alpha'), ($2, 'Beta')",
+				[tenantId, otherTenantId]);
+			await pool.query("INSERT INTO log4stellar.managed_workspaces (id, tenant_id, name) VALUES ($1, $2, 'Notes')",
+				[workspaceId, tenantId]);
+			const catalog = await readBlobGcWorkspaceCatalog(pool, { managed: true });
+			assert.equal(catalog.get(workspaceId), tenantId);
+			assert.ok(![...catalog.values()].includes(undefined));
+			const store = createBlobGcStore(pool, { migrate: false, workspaceCatalog: catalog });
+			await assert.rejects(store.workspacesForScope('workspace:unknown-fixture'), { code: 'blob_gc_workspace_not_found' });
+
+			const own = openRustfsFixture(settings, workspaceId, tenantId);
+			const foreign = openRustfsFixture(settings, workspaceId, otherTenantId);
+			const legacy = openRustfsFixture(settings, workspaceId);
+			const time = clock();
+			const scope = workspaceScope(workspaceId);
+			const collector = collectorFor({ store, inventory: own, time, apply: true, recoveryDirectory });
+			try {
+				const { objects, bytes } = await seedMixedWorkspace({ store, inventory: own, pool, workspaceId, time });
+				await foreign.put(objects.orphan, bytes.orphan);
+				await legacy.put(objects.orphan, bytes.orphan);
+				const { stdout } = await promisify(execFile)(process.execPath, [
+					fileURLToPath(new URL('./blob-gc.mjs', import.meta.url)), 'plan', scope,
+				], {
+					env: { ...process.env, LOG4STELLAR_MANAGED_TENANTS: '1', LOG4STELLAR_BLOB_GC_APPLY: '0' },
+				});
+				const planned = JSON.parse(stdout);
+				assert.equal(planned.scanned, 6, 'the operator command must scan only the catalog namespace');
+				assert.equal(planned.candidates, 1);
+				const old = await legacy.head(objects.orphan);
+				const oldStart = time.current - graceMs - minuteMs;
+				await store.observeCandidate({
+					workspaceId, digest: objects.orphan, objectVersion: old.version, sizeBytes: old.sizeBytes,
+					reason: 'legacy fixture', firstSeenMs: oldStart, eligibleAfterMs: oldStart + graceMs,
+				});
+				await collector.review(scope);
+				assert.equal((await collector.apply(scope)).deleted, 0, 'legacy observation cannot authorize managed deletion');
+				assert.ok(await own.head(objects.orphan));
+
+				const arriving = Buffer.from('uploaded before the new database reference is committed');
+				const arrivingDigest = sha256(arriving);
+				await own.put(arrivingDigest, arriving);
+				assert.equal((await collector.plan(scope)).candidates, 2);
+				assert.equal((await store.findCandidate(workspaceId, objects.orphan)).firstSeenMs, time.current);
+				assert.equal((await collector.review(scope)).promoted, 0);
+				time.advance(graceMs + minuteMs);
+				await collector.review(scope);
+
+				const writer = await pool.connect();
+				let apply;
+				try {
+					await writer.query('BEGIN');
+					await lockBlobGcWorkspaceForWrite(writer, workspaceId);
+					apply = collector.apply(scope);
+					void apply.catch(() => {});
+					const { rows: [{ pid }] } = await writer.query('SELECT pg_backend_pid() AS pid');
+					let blocked = false;
+					for (let attempt = 0; attempt < 80 && !blocked; attempt++) {
+						const { rows } = await writer.query(`
+							SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+							WHERE wait_event = 'advisory' AND $1 = ANY(pg_blocking_pids(pid))) AS blocked
+						`, [pid]);
+						blocked = rows[0].blocked;
+						if (!blocked) await delay(25);
+					}
+					assert.equal(blocked, true, 'the collector must wait for the in-progress writer transaction');
+					await insertFile(writer, workspaceId, {
+						path: 'arriving.md', digest: arrivingDigest, sizeBytes: arriving.length, createdMs: time.current,
+					});
+					await writer.query('COMMIT');
+				} finally {
+					await writer.query('ROLLBACK').catch(() => {});
+					writer.release();
+				}
+				const result = await apply;
+				assert.equal(result.deleted, 1);
+				assert.equal(result.cancelled, 1);
+				assert.equal(await own.head(objects.orphan), null);
+				assert.deepEqual(await own.bytes(arrivingDigest), arriving);
+				assert.deepEqual(await foreign.bytes(objects.orphan), bytes.orphan);
+				assert.deepEqual(await legacy.bytes(objects.orphan), bytes.orphan);
+				for (const role of ['active', 'history', 'inTrash', 'inSnapshot', 'inChanges']) {
+					assert.deepEqual(await own.bytes(objects[role]), bytes[role]);
+				}
+				const removed = await store.findCandidate(workspaceId, objects.orphan);
+				assert.equal(removed.state, 'deleted');
+				const recovered = await readFile(removed.recoveryPath);
+				assert.deepEqual(recovered, bytes.orphan);
+				await own.put(objects.orphan, recovered);
+				assert.deepEqual(await own.bytes(objects.orphan), bytes.orphan);
+			} finally {
+				await Promise.all([own.close(), foreign.close(), legacy.close()]);
+				await pool.query('DELETE FROM log4stellar.managed_workspaces WHERE id = $1', [workspaceId]);
+				await pool.query('DELETE FROM log4stellar.managed_tenants WHERE id = ANY($1::text[])', [[tenantId, otherTenantId]]);
+			}
+		});
+	});
 
 // ---------------------------------------------------------------------------------------
 // The migration and the log discipline, against the real database

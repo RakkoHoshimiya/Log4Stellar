@@ -15,7 +15,7 @@
 import { readFile } from 'node:fs/promises';
 import { Pool } from 'pg';
 import { knowledgeSchemaCurrent, migrateKnowledge, migrationLockId } from './knowledge-migrate.mjs';
-import { linkStatuses } from './knowledge-parser.mjs';
+import { knowledgeParserVersion, linkStatuses } from './knowledge-parser.mjs';
 import { WorkspaceError } from './workspace-contract.mjs';
 
 const linksTable = 'log4stellar.knowledge_links';
@@ -31,7 +31,7 @@ const linkColumns = [
 
 const maxPageSize = 200;
 const defaultPageSize = 50;
-const maxCursorLength = 512;
+const maxCursorLength = 8_192;
 
 /** Reads `LOG4STELLAR_STORAGE_CONFIG` the same way rustfs-workspace.mjs does. */
 export async function readKnowledgeStorageSettings(environment = process.env) {
@@ -243,6 +243,19 @@ function createStore(pool, configPath) {
 			}));
 		},
 
+		async listStaleNotes(workspaceId, after, limit) {
+			const { rows } = await pool.query(`
+				SELECT e.path, e.file_id AS "fileId", e.revision_id AS "revisionId"
+				FROM ${entriesTable} e
+				LEFT JOIN ${stateTable} s ON s.workspace_id = e.workspace_id AND s.file_id = e.file_id
+				WHERE e.workspace_id = $1 AND e.kind = 1 AND e.path > $2
+					AND e.path ~* '[.](md|markdown|mdown|mkdn|mkd|mdwn|mdtxt|mdtext)$'
+					AND (s.revision_id IS DISTINCT FROM e.revision_id OR s.parser_version IS DISTINCT FROM $3::int)
+				ORDER BY e.path LIMIT $4
+			`, [workspaceId, after, knowledgeParserVersion, limit]);
+			return rows;
+		},
+
 		/** The live entry for one stable file ID, or undefined once the note is deleted. */
 		async readLiveFile(workspaceId, fileId) {
 			const { rows } = await pool.query(`
@@ -307,6 +320,15 @@ function createStore(pool, configPath) {
 		 * revision the rows were produced from. Re-running with the same revision is a no-op.
 		 */
 		async replaceFileIndex(connection, { workspaceId, fileId, revisionId, parserVersion, links, tags, indexedAt }) {
+			// Keep a concurrent save from publishing an index for an obsolete revision.
+			const { rowCount } = await connection.query(`
+				SELECT 1 FROM ${entriesTable}
+				WHERE workspace_id = $1 AND file_id = $2 AND revision_id = $3 AND kind = 1
+				FOR UPDATE
+			`, [workspaceId, fileId, revisionId]);
+			if (!rowCount) {
+				return false;
+			}
 			await connection.query(
 				`DELETE FROM ${linksTable} WHERE workspace_id = $1 AND source_file_id = $2`,
 				[workspaceId, fileId],
@@ -347,6 +369,7 @@ function createStore(pool, configPath) {
 					tag_count = EXCLUDED.tag_count,
 					indexed_ms = EXCLUDED.indexed_ms
 			`, [workspaceId, fileId, revisionId, parserVersion, links.length, tags.length, indexedAt]);
+			return true;
 		},
 
 		/** Drops the index of a file that no longer exists (deleted, not merely trashed). */
@@ -376,7 +399,7 @@ function createStore(pool, configPath) {
 					s.path AS source_path
 				FROM ${linksTable} l
 				JOIN ${entriesTable} s
-					ON s.workspace_id = l.workspace_id AND s.file_id = l.source_file_id
+					ON s.workspace_id = l.workspace_id AND s.file_id = l.source_file_id AND s.revision_id = l.source_revision_id
 				LEFT JOIN ${entriesTable} t
 					ON t.workspace_id = l.workspace_id AND t.file_id = l.target_file_id
 				WHERE l.workspace_id = $1 AND l.target_file_id = $2 AND (${effectiveStatus}) = 'resolved'
@@ -403,7 +426,7 @@ function createStore(pool, configPath) {
 					s.path AS source_path
 				FROM ${linksTable} l
 				JOIN ${entriesTable} s
-					ON s.workspace_id = l.workspace_id AND s.file_id = l.source_file_id
+					ON s.workspace_id = l.workspace_id AND s.file_id = l.source_file_id AND s.revision_id = l.source_revision_id
 				LEFT JOIN ${entriesTable} t
 					ON t.workspace_id = l.workspace_id AND t.file_id = l.target_file_id
 				WHERE l.workspace_id = $1 AND l.source_file_id = $2
@@ -419,8 +442,9 @@ function createStore(pool, configPath) {
 		 * external URLs. Ambiguous rows keep their `candidate_count` so the UI can say "3 notes
 		 * share this name" instead of silently picking one.
 		 */
-		async listUnresolvedLinks(workspaceId, { cursor, limit, status } = {}) {
-			const statuses = status ? [requireStatus(status)] : ['missing', 'ambiguous', 'external'];
+		async listUnresolvedLinks(workspaceId, { cursor, limit, status, excludeExternal = false } = {}) {
+			const statuses = status ? [requireStatus(status)] : ['missing', 'ambiguous'];
+			if (!status && !excludeExternal) statuses.push('external');
 			const after = cursor
 				? `AND (s.path, l.line, l."column") > ($4, $5, $6)`
 				: '';
@@ -435,7 +459,7 @@ function createStore(pool, configPath) {
 					s.path AS source_path
 				FROM ${linksTable} l
 				JOIN ${entriesTable} s
-					ON s.workspace_id = l.workspace_id AND s.file_id = l.source_file_id
+					ON s.workspace_id = l.workspace_id AND s.file_id = l.source_file_id AND s.revision_id = l.source_revision_id
 				LEFT JOIN ${entriesTable} t
 					ON t.workspace_id = l.workspace_id AND t.file_id = l.target_file_id
 				WHERE l.workspace_id = $1 AND (${effectiveStatus}) = ANY($2::text[])
@@ -447,42 +471,34 @@ function createStore(pool, configPath) {
 		},
 
 		/** Tag cloud: one row per normalised tag key with its usage count and display form. */
-		async listTags(workspaceId, { prefix, limit } = {}) {
-			const params = [workspaceId];
-			let filter = '';
-			if (prefix) {
-				params.push(prefix.toLowerCase() + '%');
-				filter = `AND g.tag_key LIKE $${params.length}`;
-			}
-			params.push(limit);
+		async listTags(workspaceId, { prefix = '', after = '', limit } = {}) {
 			const { rows } = await pool.query(`
 				SELECT g.tag_key, min(g.tag) AS tag, count(*)::int AS uses
 				FROM ${tagsTable} g
 				JOIN ${entriesTable} e
-					ON e.workspace_id = g.workspace_id AND e.file_id = g.file_id
-				WHERE g.workspace_id = $1 ${filter}
+					ON e.workspace_id = g.workspace_id AND e.file_id = g.file_id AND e.revision_id = g.revision_id
+				WHERE g.workspace_id = $1 AND starts_with(g.tag_key, $2) AND g.tag_key > $3
 				GROUP BY g.tag_key
 				ORDER BY g.tag_key
-				LIMIT $${params.length}
-			`, params);
+				LIMIT $4
+			`, [workspaceId, prefix.toLowerCase(), after, limit]);
 			return rows.map(row => ({ tagKey: row.tag_key, tag: row.tag, uses: Number(row.uses) }));
 		},
 
 		/** Every occurrence of one tag (or one tag subtree), with the live path of its file. */
-		async listTagOccurrences(workspaceId, tagKey, { includeChildren = false, limit } = {}) {
+		async listTagOccurrences(workspaceId, tagKey, { includeChildren = false, after, limit } = {}) {
 			const key = String(tagKey).toLowerCase();
-			const pattern = includeChildren ? key.replace(/[!%_\\]/g, '\\$&') + '/%' : null;
 			const { rows } = await pool.query(`
-				SELECT g.file_id, g.revision_id, g.tag, g.tag_key, g.line, g."column",
-					e.path
+				SELECT g.file_id, g.revision_id, g.tag, g.tag_key, g.line, g."column", e.path
 				FROM ${tagsTable} g
 				JOIN ${entriesTable} e
-					ON e.workspace_id = g.workspace_id AND e.file_id = g.file_id
+					ON e.workspace_id = g.workspace_id AND e.file_id = g.file_id AND e.revision_id = g.revision_id
 				WHERE g.workspace_id = $1
-					AND (g.tag_key = $2 OR ($3::text IS NOT NULL AND g.tag_key LIKE $3))
+					AND (g.tag_key = $2 OR ($3::boolean AND starts_with(g.tag_key, $2 || '/')))
+					AND (e.path, g.line, g."column") > ($4::text, $5::int, $6::int)
 				ORDER BY e.path, g.line, g."column"
-				LIMIT $4
-			`, [workspaceId, key, pattern, limit]);
+				LIMIT $7
+			`, [workspaceId, key, includeChildren, after?.path ?? '', after?.order[0] ?? 0, after?.order[1] ?? 0, limit]);
 			return rows.map(tagJson);
 		},
 

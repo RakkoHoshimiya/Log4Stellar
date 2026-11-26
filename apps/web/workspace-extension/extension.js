@@ -487,12 +487,15 @@ class WorkspaceFileSystem {
 			}
 			for (const item of page.items ?? []) {
 				const uri = options.folder.with({ path: item.path });
-				const start = new vscode.Position(0, item.excerptOffset);
-				const end = new vscode.Position(0, item.excerptOffset + item.excerptLength);
+				const previewStart = new vscode.Position(0, item.excerptOffset);
+				const previewEnd = new vscode.Position(0, item.excerptOffset + item.excerptLength);
+				const line = Math.max(item.line - 1, 0);
+				const column = Math.max(item.column - 1, 0);
+				const sourceLength = item.match === 'body' ? item.excerptLength : 0;
 				progress.report({
 					uri,
-					ranges: [new vscode.Range(start, end)],
-					preview: { text: item.excerpt, matches: [new vscode.Range(start, end)] },
+					ranges: [new vscode.Range(new vscode.Position(line, column), new vscode.Position(line, column + sourceLength))],
+					preview: { text: item.excerpt, matches: [new vscode.Range(previewStart, previewEnd)] },
 				});
 			}
 			return { limitHit: page.hasMore === true };
@@ -524,6 +527,15 @@ const gitLabels = {
 		confirmFetch: 'Fetch updates from the configured remote?', fetched: 'Fetch completed.', pushed: 'Push completed.',
 		confirmPush: 'Push {0} at {1} to the configured remote?', denied: 'Your workspace role does not allow this Git action.',
 		moved: 'The remote branch changed. Fetch the latest state before trying again.', failed: 'The Git action failed. Refresh the repository status and try again.',
+		switchBranch: "Switch branch",
+		diverged: 'The push would overwrite remote commits. Integrate the remote changes before pushing.',
+		currentBranch: "Current branch",
+		noLocalBranches: "There are no other local branches.",
+		switched: "Switched to {0}.",
+		dirty: "Commit or stash the changes in the repository before switching branches.",
+		branchMissing: "The selected branch no longer exists. Refresh the branch list.",
+		pushBranchOnly: "Switch to the configured remote branch before pushing.",
+		headChanged: "The local commit changed. Review the current commit before pushing.",
 	},
 	'zh-cn': {
 		status: '工作树状态', log: '提交历史', fetch: '拉取远端引用', push: '推送', branch: '分支',
@@ -532,6 +544,15 @@ const gitLabels = {
 		confirmFetch: '从已配置的远端拉取更新？', fetched: '已拉取远端引用。', pushed: '已推送。',
 		confirmPush: '将分支 {0} 的提交 {1} 推送到已配置的远端？', denied: '当前工作区角色没有执行此 Git 操作的权限。',
 		moved: '远端分支已变化，请先重新拉取。', failed: 'Git 操作失败。请刷新仓库状态后重试。',
+		switchBranch: "切换分支",
+		diverged: '这次推送会覆盖远端提交。请先合并远端变更或完成变基，再推送。',
+		currentBranch: "当前分支",
+		noLocalBranches: "没有可切换的本地分支。",
+		switched: "已切换到 {0}。",
+		dirty: "工作树有未提交的改动。请先提交或暂存改动，再切换分支。",
+		branchMissing: "选中的分支已不存在，请刷新分支列表。",
+		pushBranchOnly: "请先切换到配置的远端分支，再推送。",
+		headChanged: "本地提交已变化，请核对当前提交后再推送。",
 	},
 	'zh-tw': {
 		status: '工作樹狀態', log: '提交記錄', fetch: '擷取遠端參照', push: '推送', branch: '分支',
@@ -540,6 +561,15 @@ const gitLabels = {
 		confirmFetch: '從已設定的遠端擷取更新？', fetched: '已擷取遠端參照。', pushed: '已推送。',
 		confirmPush: '將分支 {0} 的提交 {1} 推送到已設定的遠端？', denied: '目前工作區角色沒有執行此 Git 操作的權限。',
 		moved: '遠端分支已變更，請先重新擷取。', failed: 'Git 操作失敗。請重新整理儲存庫狀態後再試。',
+		switchBranch: "切換分支",
+		diverged: '這次推送會覆蓋遠端提交。請先合併遠端變更或完成重定基底，再推送。',
+		currentBranch: "目前分支",
+		noLocalBranches: "沒有可切換的本機分支。",
+		switched: "已切換至 {0}。",
+		dirty: "工作樹有未提交的變更。請先提交或暫存變更，再切換分支。",
+		branchMissing: "選取的分支已不存在，請重新整理清單。",
+		pushBranchOnly: "請先切換到已設定的遠端分支，再推送。",
+		headChanged: "本機提交已變更，請確認目前的提交後再推送。",
 	},
 	ja: {
 		status: '作業ツリー', log: 'コミット履歴', fetch: 'フェッチ', push: 'プッシュ', branch: 'ブランチ',
@@ -548,6 +578,15 @@ const gitLabels = {
 		confirmFetch: '設定されているリモートから更新をフェッチしますか？', fetched: 'フェッチしました。', pushed: 'プッシュしました。',
 		confirmPush: '{0} のコミット {1} を設定済みのリモートにプッシュしますか？', denied: 'ワークスペースのロールではこの Git 操作は許可されていません。',
 		moved: 'リモート ブランチが変更されました。再度フェッチしてください。', failed: 'Git 操作に失敗しました。リポジトリの状態を更新してから再試行してください。',
+		switchBranch: "ブランチの切り替え",
+		diverged: 'このプッシュはリモートのコミットを上書きします。リモートの変更を取り込んでから再度プッシュしてください。',
+		currentBranch: "現在のブランチ",
+		noLocalBranches: "切り替え先のローカル ブランチがありません。",
+		switched: "{0} に切り替えました。",
+		dirty: "未コミットの変更があります。コミットまたはスタッシュしてからブランチを切り替えてください。",
+		branchMissing: "選択したブランチが存在しません。一覧を更新してください。",
+		pushBranchOnly: "プッシュする前に、設定済みのリモート ブランチに切り替えてください。",
+		headChanged: "ローカルのコミットが変わりました。現在のコミットを確認してからプッシュしてください。",
 	},
 };
 
@@ -568,6 +607,7 @@ async function openGitRepository(provider, folder) {
 		const actions = [
 			{ id: 'status', label: labels.status },
 			{ id: 'log', label: labels.log },
+			{ id: 'switchBranch', label: labels.switchBranch },
 			...(repository.remoteId ? [{ id: 'fetch', label: labels.fetch }, { id: 'push', label: labels.push }] : []),
 		];
 		const title = branch ? `${repository.path} · ${labels.branch} ${branch}` : repository.path;
@@ -596,6 +636,22 @@ async function openGitRepository(provider, folder) {
 				})), { title: labels.log, matchOnDescription: true, matchOnDetail: true });
 				return;
 			}
+			case 'switchBranch': {
+				const { branches, current } = await request('branches');
+				const targets = branches.filter(entry => !entry.current && entry.name !== current);
+				if (!targets.length) {
+					await vscode.window.showInformationMessage(labels.noLocalBranches);
+					return;
+				}
+				const target = await vscode.window.showQuickPick(targets.map(entry => ({
+					label: entry.name,
+					description: entry.commit.slice(0, 12),
+				})), { title: labels.switchBranch, placeHolder: current ? `${labels.currentBranch} ${current}` : undefined });
+				if (!target) return;
+				await request('branch', { body: { name: target.label } });
+				await vscode.window.showInformationMessage(labels.switched.replace('{0}', () => target.label));
+				return;
+			}
 			case 'fetch': {
 				if (await vscode.window.showWarningMessage(labels.confirmFetch, { modal: true }, labels.fetch) === labels.fetch) {
 					await request('fetch', { body: {} });
@@ -604,7 +660,11 @@ async function openGitRepository(provider, folder) {
 				return;
 			}
 			case 'push': {
-				if (!branch || branch !== repository.remoteBranch || !repository.head.commit || !repository.lastFetch) {
+				if (!branch || branch !== repository.remoteBranch || !repository.head.commit) {
+					await vscode.window.showWarningMessage(labels.pushBranchOnly);
+					return;
+				}
+				if (!repository.lastFetch) {
 					await vscode.window.showWarningMessage(labels.fetchFirst);
 					return;
 				}
@@ -623,9 +683,12 @@ async function openGitRepository(provider, folder) {
 		}
 	} catch (error) {
 		const code = error?.message;
-		const message = code === 'NoPermissions' || code === 'AccountChanged' || code === 'WorkspaceSessionRequired'
-			? labels.denied
-			: code === 'RemoteChanged' || code === 'NotFastForward' || code === 'HeadChanged' ? labels.moved : labels.failed;
+		const errors = {
+			NoPermissions: labels.denied, AccountChanged: labels.denied, WorkspaceSessionRequired: labels.denied,
+			RemoteChanged: labels.moved, NotFastForward: labels.diverged, HeadChanged: labels.headChanged,
+			WorkTreeDirty: labels.dirty, BranchNotFound: labels.branchMissing,
+		};
+		const message = Object.hasOwn(errors, code) ? errors[code] : labels.failed;
 		await vscode.window.showErrorMessage(message);
 	}
 }
@@ -740,6 +803,10 @@ async function renderPreviewPane(provider, uri, preview, { labels, extensionUri 
 function configureOfficePreview(panel, extensionUri, messages, load, token) {
 	const viewerUri = panel.webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'office-viewer.mjs'));
 	const assetOrigin = escapeAttribute(new URL(viewerUri.toString()).origin);
+	const workerUri = escapeAttribute(new URL('./pdf.worker.min.mjs', viewerUri.toString()).href);
+	const pageLabel = translated(['Page {0} of {1}', '第 {0} 页，共 {1} 页', '第 {0} 頁，共 {1} 頁', '{1} ページ中 {0} ページ']);
+	const previewLabel = translated(['Document preview', '文档预览', '文件預覽', 'ドキュメントのプレビュー']);
+	const emptyLabel = translated(['This document has no preview pages.', '此文档没有可预览的页面。', '此文件沒有可預覽的頁面。', 'このドキュメントにプレビューできるページがありません。']);
 	const drawError = translated([
 		'The PDF preview could not be displayed. Reopen it to try again.',
 		'无法显示 PDF 预览，请重新打开。',
@@ -773,12 +840,12 @@ function configureOfficePreview(panel, extensionUri, messages, load, token) {
 	});
 	panel.webview.html = [
 		'<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">',
-		`<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${assetOrigin}; worker-src blob: ${assetOrigin}; font-src blob:; style-src 'unsafe-inline';">`,
+		`<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${assetOrigin}; worker-src blob:; connect-src ${workerUri}; font-src blob:; style-src 'unsafe-inline';">`,
 		'<style>body{margin:0;background:var(--vscode-editor-background);color:var(--vscode-editor-foreground);font-family:var(--vscode-font-family)}',
 		'#status{padding:12px;text-align:center}progress{width:min(320px,90%);accent-color:var(--vscode-progressBar-background)}',
 		'#pages{padding:12px}section{margin:0 auto 12px;width:100%;background:#fff;box-shadow:0 1px 6px #0004}canvas{display:block;width:100%;height:auto}</style>',
 		`</head><body><div id="status" role="status" data-error="${escapeAttribute(drawError)}"><p id="message">${escapeAttribute(messages.preparing)}</p>`,
-		`<progress aria-label="${escapeAttribute(messages.preparing)}"></progress></div><main id="pages"></main>`,
+		`<progress aria-label="${escapeAttribute(messages.preparing)}"></progress></div><main id="pages" tabindex="0" aria-label="${escapeAttribute(previewLabel)}" data-page-label="${escapeAttribute(pageLabel)}" data-empty="${escapeAttribute(emptyLabel)}"></main>`,
 		`<script type="module" src="${escapeAttribute(viewerUri.toString())}"></script></body></html>`,
 	].join('');
 }
@@ -866,6 +933,190 @@ async function openOfficePreview(provider, uri, options = {}) {
 	}
 }
 
+
+const knowledgeViewId = 'log4stellar.knowledge';
+const knowledgeOpenCommand = 'log4stellar.knowledge.open';
+const knowledgeMoreCommand = 'log4stellar.knowledge.more';
+
+async function requestKnowledge(provider, uri, route, query = {}, { body, signal } = {}) {
+	const workspace = workspaceFromAuthority(uri.authority);
+	const url = new URL('/api/knowledge/' + route, provider.origin);
+	url.search = new URLSearchParams(query).toString();
+	const headers = new Headers({
+		'X-Log4Stellar-Workspace': workspace,
+		'X-Log4Stellar-Workspace-Account': accountFromAuthority(uri.authority),
+	});
+	if (body !== undefined) {
+		headers.set('Content-Type', 'application/json');
+	}
+	const response = await fetch(url, {
+		cache: 'no-store', redirect: 'error', signal, headers,
+		method: body === undefined ? 'GET' : 'POST',
+		body: body === undefined ? undefined : JSON.stringify(body),
+	});
+	if (!response.ok) {
+		throw Object.assign(new Error('KnowledgeRequestFailed'), { status: response.status });
+	}
+	return response.json();
+}
+
+function registerKnowledgeView(context, provider) {
+	const language = vscode.env.language.toLowerCase();
+	const translations = language === 'zh-tw'
+		? ['反向連結', '標籤', '失效連結', '開啟 Markdown 筆記以查看反向連結', '沒有結果', '載入更多', '讀取知識關聯失敗', '更新知識索引', '索引更新失敗，請檢查工作區寫入權限', '索引已更新', '未找到目標', '同名歧義']
+		: language.startsWith('zh')
+			? ['反向链接', '标签', '断链', '打开 Markdown 笔记以查看反向链接', '没有结果', '加载更多', '读取知识关联失败', '更新知识索引', '索引更新失败，请检查工作区写入权限', '索引已更新', '未找到目标', '同名歧义']
+			: language === 'ja'
+				? ['バックリンク', 'タグ', 'リンク切れ', 'Markdown ノートを開いてください', '結果なし', 'さらに読み込む', 'ナレッジ関連を読み込めません', 'ナレッジ索引を更新', '索引を更新できません。書き込み権限を確認してください', '索引を更新しました', 'リンク先がありません', '同じ名前が複数あります']
+				: ['Backlinks', 'Tags', 'Broken links', 'Open a Markdown note to see backlinks', 'No results', 'Load more', 'Could not load knowledge links', 'Update knowledge index', 'Could not update the index. Check your workspace write permission.', 'Index updated', 'Target missing', 'Ambiguous target'];
+	const [backlinks, tags, broken, openNote, empty, more, unavailable, reindex, reindexError, updated, missing, ambiguous] = translations;
+	const change = new vscode.EventEmitter();
+	const pages = new Map();
+	let controller = new AbortController();
+	const groups = [
+		{ id: 'backlinks', label: backlinks },
+		{ id: 'tags', label: tags },
+		{ id: 'broken', label: broken },
+	];
+
+	const root = () => vscode.workspace.workspaceFolders?.find(folder => folder.uri.scheme === scheme)?.uri;
+	const active = () => vscode.window.tabGroups.activeTabGroup.activeTab?.input?.uri;
+	const markdown = uri => uri?.scheme === scheme && /\.(?:md|markdown|mdown|mkdn|mkd|mdwn|mdtxt|mdtext)$/i.test(uri.path);
+	const source = (rootUri, row) => {
+		const path = row.sourcePath ?? row.path;
+		if (typeof path !== 'string' || !path.startsWith('/')) {
+			return undefined;
+		}
+		const line = row.line;
+		const column = row.column;
+		const title = path.split('/').pop() || path;
+		return { label: title, description: path + ':' + line, uri: rootUri.with({ path }), line, column };
+	};
+	const refresh = () => {
+		controller.abort();
+		controller = new AbortController();
+		pages.clear();
+		change.fire();
+	};
+	const readPage = async (parent, request, project, cursor) => {
+		const signal = controller.signal;
+		try {
+			const result = await request(cursor, signal);
+			if (signal.aborted) {
+				return [];
+			}
+			const items = [...(cursor ? pages.get(parent.id)?.items ?? [] : []), ...project(result)];
+			const nextCursor = result.nextCursor;
+			pages.set(parent.id, { items, nextCursor, request, project });
+			return nextCursor
+				? [...items, { label: more, nextCursor, parent }]
+				: items.length ? items : [{ label: empty }];
+		} catch {
+			if (signal.aborted) return [];
+			const items = [{ label: unavailable }];
+			pages.set(parent.id, { items });
+			return items;
+		}
+	};
+	const getChildren = async parent => {
+		const rootUri = root();
+		if (!rootUri) {
+			return [];
+		}
+		if (!parent) {
+			return groups;
+		}
+		const cached = pages.get(parent.id);
+		if (cached) {
+			return cached.nextCursor
+				? [...cached.items, { label: more, nextCursor: cached.nextCursor, parent }]
+				: cached.items.length ? cached.items : [{ label: empty }];
+		}
+		const load = (route, query, project) => {
+			const request = (cursor, signal) => requestKnowledge(provider, rootUri, route, { ...query, ...(cursor ? { cursor } : {}) }, { signal });
+			return readPage(parent, request, project);
+		};
+		const links = body => body.links.map(row => {
+			const item = source(rootUri, row);
+			if (item && parent.id === 'broken') {
+				item.description = (row.status === 'ambiguous' ? ambiguous : missing) + ' · ' + String(row.raw);
+			}
+			return item;
+		}).filter(Boolean);
+		if (parent.id === 'backlinks') {
+			const uri = active();
+			if (!markdown(uri) || uri.authority !== rootUri.authority) {
+				return [{ label: openNote }];
+			}
+			return load('backlinks', { path: uri.path, limit: 50 }, links);
+		}
+		if (parent.id === 'tags') {
+			return load('tags', { limit: 50 }, body => body.tags.map(row => ({
+				id: 'tag:' + row.tagKey, label: '#' + row.tag, description: String(row.uses), tagKey: row.tagKey,
+			})));
+		}
+		if (parent.tagKey) {
+			return load('tags/' + encodeURIComponent(parent.tagKey), { limit: 50 },
+				body => body.occurrences.map(row => source(rootUri, row)).filter(Boolean));
+		}
+		if (parent.id === 'broken') {
+			return load('broken', { limit: 50, excludeExternal: '1' }, links);
+		}
+		return [];
+	};
+	context.subscriptions.push(change,
+		new vscode.Disposable(() => controller.abort()),
+		vscode.window.tabGroups.onDidChangeTabs(refresh),
+		vscode.window.tabGroups.onDidChangeTabGroups(refresh),
+		vscode.workspace.onDidChangeWorkspaceFolders(refresh),
+		vscode.workspace.onDidSaveTextDocument(({ uri }) => { if (markdown(uri)) refresh(); }),
+		vscode.window.registerTreeDataProvider(knowledgeViewId, {
+			onDidChangeTreeData: change.event,
+			getChildren,
+			getTreeItem(entry) {
+				const item = new vscode.TreeItem(entry.label, entry.id
+					? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None);
+				item.id = entry.id;
+				item.description = entry.description;
+				if (entry.uri) item.command = { command: knowledgeOpenCommand, title: entry.label, arguments: [entry] };
+				if (entry.nextCursor) item.command = { command: knowledgeMoreCommand, title: entry.label, arguments: [entry] };
+				return item;
+			},
+		}),
+		vscode.commands.registerCommand(knowledgeOpenCommand, async entry => {
+			const rootUri = root();
+			if (!rootUri || entry?.uri?.scheme !== scheme || entry.uri.authority !== rootUri.authority) {
+				return;
+			}
+			const position = new vscode.Position(Math.max(0, (entry.line || 1) - 1), Math.max(0, (entry.column || 1) - 1));
+			const selection = new vscode.Range(position, position);
+			const editor = await vscode.window.showTextDocument(entry.uri, { selection });
+			editor.revealRange(selection);
+		}),
+		vscode.commands.registerCommand(knowledgeMoreCommand, async ({ parent, nextCursor }) => {
+			const page = pages.get(parent.id);
+			if (page?.nextCursor === nextCursor) {
+				await readPage(parent, page.request, page.project, nextCursor);
+				change.fire(parent);
+			}
+		}),
+		vscode.commands.registerCommand('log4stellar.knowledge.refresh', refresh),
+		vscode.commands.registerCommand('log4stellar.knowledge.reindex', async () => {
+			const rootUri = root();
+			if (!rootUri) return;
+			try {
+				const result = await vscode.window.withProgress({ title: reindex, location: vscode.ProgressLocation.Notification },
+					() => requestKnowledge(provider, rootUri, 'reindex', {}, { body: { force: true } }));
+				refresh();
+				await vscode.window.showInformationMessage(updated + ': ' + result.indexed
+					+ (result.failed.length ? ' · ' + unavailable + ': ' + result.failed.length : ''));
+			} catch {
+				await vscode.window.showWarningMessage(reindexError);
+			}
+		}),
+	);
+}
+
 async function activate(context) {
 	const provider = new WorkspaceFileSystem(new URL(context.extensionUri.toString()).origin);
 	const root = vscode.workspace.workspaceFolders?.find(folder => folder.uri.scheme === scheme)?.uri ?? vscode.Uri.from({ scheme, path: '/' });
@@ -880,6 +1131,9 @@ async function activate(context) {
 	context.subscriptions.push(vscode.workspace.registerTextSearchProvider(scheme, provider));
 
 	registerOfficeEditor(context, provider);
+	if (typeof vscode.window.registerTreeDataProvider === 'function') {
+		registerKnowledgeView(context, provider);
+	}
 	context.subscriptions.push(vscode.commands.registerCommand('log4stellar.workspace.preview', async uri => {
 		const resource = uri instanceof vscode.Uri ? uri : undefined;
 		const active = resource ?? vscode.window.activeTextEditor?.document?.uri;
@@ -898,6 +1152,23 @@ async function activate(context) {
 	}));
 	context.subscriptions.push(vscode.commands.registerCommand('log4stellar.workspace.tenants', () =>
 		vscode.env.openExternal(vscode.Uri.parse(new URL('/account/tenants', provider.origin).toString()))));
+	context.subscriptions.push(vscode.commands.registerCommand('log4stellar.workspace.advancedSearch', () => {
+		const folder = vscode.workspace.workspaceFolders?.find(item => item.uri.scheme === scheme);
+		if (!folder) return;
+		const url = new URL('/advanced-search', provider.origin);
+		url.searchParams.set('l4sWorkspace', workspaceFromAuthority(folder.uri.authority));
+		return vscode.env.openExternal(vscode.Uri.parse(url.toString()));
+	}));
+	context.subscriptions.push(vscode.commands.registerCommand('log4stellar.workspace.upload', uri => {
+		const root = vscode.workspace.workspaceFolders?.find(item => item.uri.scheme === scheme)?.uri;
+		const folder = uri?.scheme === scheme ? uri : root;
+		if (!folder) return;
+		const workspaceId = workspaceFromAuthority(folder.authority);
+		const url = new URL('/uploads', provider.origin);
+		url.searchParams.set('l4sWorkspace', workspaceId);
+		url.searchParams.set('directory', folder.path);
+		return vscode.env.openExternal(vscode.Uri.parse(url.toString()));
+	}));
 	context.subscriptions.push(vscode.commands.registerCommand('log4stellar.workspace.git', () => {
 		const folder = vscode.workspace.workspaceFolders?.find(item => item.uri.scheme === scheme);
 		return openGitRepository(provider, folder);

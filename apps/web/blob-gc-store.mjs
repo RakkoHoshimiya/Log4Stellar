@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 
 import { migrationLockId } from './sync-migrate.mjs';
 import { syncRetention } from './sync-contract.mjs';
-import { WorkspaceError } from './workspace-contract.mjs';
+import { isValidWorkspaceId, WorkspaceError } from './workspace-contract.mjs';
 
 // PostgreSQL access for the object-storage collector (task 06, 存储对象清理).
 //
@@ -200,18 +200,45 @@ export async function migrateBlobGcSchema(pool) {
 	}
 }
 
-// A second advisory-lock class for per-object mutual exclusion. The migration lock is
-// class 0 through the single-argument form, so these two never collide.
+// Separate GC locks from the single-argument schema migration lock.
 const candidateLockClass = 0x4743; // 'GC'
+
+function workspaceLockKey(workspaceId) {
+	return 'workspace:' + workspaceId;
+}
+
+/** Keeps a content upload or restore and its new references atomic with respect to GC. */
+export async function lockBlobGcWorkspaceForWrite(connection, workspaceId) {
+	await connection.query('SELECT pg_advisory_xact_lock_shared($1, hashtext($2))',
+		[candidateLockClass, workspaceLockKey(workspaceId)]);
+}
+
+/** Resolve the namespace from database ownership. Never derive a tenant from an S3 key. */
+export async function readBlobGcWorkspaceCatalog(pool, { managed = false } = {}) {
+	const { rows: [shape] } = await pool.query("SELECT to_regclass('log4stellar.managed_workspaces') IS NOT NULL AS present");
+	if (managed && !shape.present) throw new WorkspaceError(503, 'blob_gc_tenant_catalog_missing');
+	const { rows } = await pool.query(shape.present
+		? `SELECT w.id, m.tenant_id FROM log4stellar.storage_workspaces w
+		   LEFT JOIN log4stellar.managed_workspaces m ON m.id = w.id
+		   WHERE NOT $1::boolean OR m.id IS NOT NULL ORDER BY w.id`
+		: 'SELECT id FROM log4stellar.storage_workspaces ORDER BY id', shape.present ? [managed] : []);
+	return new Map(rows.map(({ id, tenant_id }) => {
+		if (!isValidWorkspaceId(id) || (tenant_id && !/^tenant-[0-9a-f]{32}$/.test(tenant_id))) {
+			throw new WorkspaceError(503, 'blob_gc_invalid_catalog');
+		}
+		return [id, tenant_id ?? undefined];
+	}));
+}
 
 /**
  * The collector's PostgreSQL access.
  *
  * @param {import('pg').Pool} pool a pool already pointed at the storage database.
- * @param {{migrate?: boolean}} [options] migrate defaults to true; tests that build the
+ * @param {{migrate?: boolean, workspaceCatalog?: Map<string, string | undefined>}} [options]
+ *   migrate defaults to true; tests that build the
  *   schema themselves may skip it.
  */
-export function createBlobGcStore(pool, { migrate = true } = {}) {
+export function createBlobGcStore(pool, { migrate = true, workspaceCatalog } = {}) {
 	let migrated = null;
 	function shape() {
 		migrated ??= migrate ? migrateBlobGcSchema(pool) : Promise.resolve();
@@ -356,14 +383,16 @@ export function createBlobGcStore(pool, { migrate = true } = {}) {
 				last_error = NULL,
 				state = 'observed',
 				first_seen_ms = CASE
-					WHEN c.state IN ('observed', 'eligible') THEN c.first_seen_ms
+					WHEN c.state IN ('observed', 'eligible')
+						AND c.object_version IS NOT DISTINCT FROM EXCLUDED.object_version THEN c.first_seen_ms
 					ELSE EXCLUDED.first_seen_ms
 				END,
 				eligible_after_ms = CASE
-					WHEN c.state IN ('observed', 'eligible') THEN c.eligible_after_ms
+					WHEN c.state IN ('observed', 'eligible')
+						AND c.object_version IS NOT DISTINCT FROM EXCLUDED.object_version THEN c.eligible_after_ms
 					ELSE EXCLUDED.eligible_after_ms
 				END
-			 WHERE c.state IN ('observed', 'eligible', 'deleting', 'deleted', 'cancelled', 'failed')
+			 WHERE c.state <> 'deleting'
 			 RETURNING *`,
 			[workspaceId, digest, objectVersion ?? null, sizeBytes ?? 0, runId ?? null, reason, firstSeenMs, eligibleAfterMs],
 		);
@@ -525,6 +554,7 @@ export function createBlobGcStore(pool, { migrate = true } = {}) {
 	async function workspacesForScope(scope) {
 		if (typeof scope !== 'string') throw new WorkspaceError(400, 'invalid_scope');
 		if (scope === 'all') {
+			if (workspaceCatalog) return [...workspaceCatalog.keys()];
 			const { rows } = await query(
 				'SELECT id FROM log4stellar.storage_workspaces ORDER BY id',
 			);
@@ -532,7 +562,8 @@ export function createBlobGcStore(pool, { migrate = true } = {}) {
 		}
 		if (scope.startsWith('workspace:')) {
 			const workspaceId = scope.slice('workspace:'.length);
-			if (!workspaceId) throw new WorkspaceError(400, 'invalid_scope');
+			if (!isValidWorkspaceId(workspaceId)) throw new WorkspaceError(400, 'invalid_scope');
+			if (workspaceCatalog && !workspaceCatalog.has(workspaceId)) throw new WorkspaceError(404, 'blob_gc_workspace_not_found');
 			return [workspaceId];
 		}
 		throw new WorkspaceError(400, 'invalid_scope');
@@ -543,6 +574,7 @@ export function createBlobGcStore(pool, { migrate = true } = {}) {
 		migrate: shape,
 		readTransaction,
 		writeTransaction,
+		withWorkspaceLock: (workspaceId, action) => writeTransaction(action, { lockKey: workspaceLockKey(workspaceId) }),
 		beginRun,
 		readRun,
 		updateRun,

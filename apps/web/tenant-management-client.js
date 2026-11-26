@@ -1,18 +1,21 @@
 (() => {
 	'use strict';
 
-	const { strings, accountId } = JSON.parse(new TextDecoder().decode(
+	const { strings, accountId, managed } = JSON.parse(new TextDecoder().decode(
 		Uint8Array.from(atob(document.body.dataset.config), character => character.charCodeAt(0))));
 	const get = id => document.getElementById(id);
 	const select = get('tenant');
 	const scope = get('scope');
 	const admin = get('admin');
 	const notice = get('notice');
-	const api = '/api/v1/tenants';
+	const management = '/api/v2/management';
+	const api = managed ? management + '/tenants' : '/api/v1/tenants';
 	const date = new Intl.DateTimeFormat(document.documentElement.lang, { dateStyle: 'medium', timeStyle: 'short' });
 	const errorLabels = {
-		NetworkUnavailable: 'network', InvalidEmail: 'invalidEmail', InvalidTenantRole: 'invalidRole',
-		LastAdmin: 'lastAdmin', VersionConflict: 'conflict', InvitationNotPending: 'conflict',
+		TenantSecondFactorRequired: 'securityVerify', NetworkUnavailable: 'network', InvalidEmail: 'invalidEmail',
+		InvalidTenantName: 'invalidName', InvalidWorkspaceName: 'invalidName',
+		InvalidTenantRole: 'invalidRole', InvalidWorkspaceRole: 'invalidRole',
+		LastAdmin: 'lastAdmin', LastWorkspaceOwner: 'lastOwner', VersionConflict: 'conflict', InvitationNotPending: 'conflict',
 	};
 	let blocked = false;
 
@@ -84,6 +87,15 @@
 				clearToken();
 				get('invite-input').value = '';
 				get('email').value = '';
+				if (managed) {
+					get('platform').hidden = true;
+						get('tenant-security').hidden = true;
+					get('create-tenant').reset();
+					get('create-tenant').elements.initialAdminId.replaceChildren();
+					get('platform-tenants').replaceChildren();
+					get('workspace-picker').replaceChildren();
+					get('workspace-grants').replaceChildren();
+				}
 				select.replaceChildren();
 				scope.hidden = true;
 				for (const id of ['workspaces', 'members', 'invitations', 'audit']) {
@@ -102,7 +114,7 @@
 
 	const tenantUrl = () => api + '/' + encodeURIComponent(select.value);
 	const roleText = role => strings[{ 1: 'member', 2: 'admin' }[role]] ?? strings.noAccess;
-	const workspaceRoleText = role => strings[{ 1: 'viewer', 2: 'editor', 3: 'owner', viewer: 'viewer', editor: 'editor', owner: 'owner' }[role]] ?? strings.noAccess;
+	const workspaceRoleText = role => strings[{ 1: 'viewer', 2: 'editor', 3: 'owner' }[role]] ?? strings.noAccess;
 
 	function formatList(container, rows, render) {
 		container.replaceChildren(...rows.map(render));
@@ -125,7 +137,7 @@
 		} else {
 			formatList(container, rows, render);
 		}
-		if (data.nextCursor !== null) {
+		if (data.nextCursor != null) {
 			const node = element('li');
 			node.append(button(strings.more, () => perform(() => page(key, url, render, { cursor: data.nextCursor, node }))));
 			container.append(node);
@@ -146,14 +158,18 @@
 		role.value = String(member.role);
 		const url = base + '/members/' + encodeURIComponent(member.userId);
 		const save = button(strings.save, () => perform(async () => {
-			await request(url, 'PATCH', { role: Number(role.value), version: member.version });
+			await request(url, managed ? 'PUT' : 'PATCH', { role: Number(role.value), version: member.version, expectedVersion: member.version });
 			await loadTenants(select.value);
 			return 'saved';
 		}));
 		const remove = button(strings.remove, () => {
 			if (window.confirm(strings.confirmRemove)) {
 				void perform(async () => {
-					await request(url + '?' + new URLSearchParams({ version: member.version }), 'DELETE');
+					if (managed) {
+						await request(url, 'PUT', { role: null, expectedVersion: member.version });
+					} else {
+						await request(url + '?' + new URLSearchParams({ version: member.version }), 'DELETE');
+					}
 					await loadTenants(select.value);
 					return 'saved';
 				});
@@ -181,18 +197,40 @@
 		return row;
 	}
 
+	async function loadSecurity(base, role) {
+		const policy = await request(base + '/security');
+		get('tenant-security').hidden = false;
+		get('tenant-security-state').textContent = policy.verifiedSession
+			? policy.requireSecondFactor ? strings.securityRequired : ''
+			: strings.securityVerify;
+		const save = get('tenant-security-save');
+		save.hidden = role !== '2' || !policy.verifiedSession;
+		save.textContent = policy.requireSecondFactor ? strings.securityOptional : strings.securityRequire;
+		save.onclick = () => void perform(async () => {
+			await request(base + '/security', 'PUT', {
+				requireSecondFactor: !policy.requireSecondFactor, expectedVersion: policy.version,
+			});
+			await loadScope();
+			return 'saved';
+		});
+		return !policy.requireSecondFactor || policy.verifiedSession;
+	}
+
 	async function loadScope() {
 		scope.hidden = true;
 		admin.hidden = true;
+		if (managed) get('tenant-security').hidden = true;
 		const selected = select.selectedOptions[0];
 		if (!selected) {
 			return 'noTenant';
 		}
 		const base = tenantUrl();
-		const { workspaces } = await request(base + '/workspaces');
+		if (managed && !await loadSecurity(base, selected.dataset.role)) return 'securityVerify';
+		const response = await request(managed ? management + '/workspaces' : base + '/workspaces');
+		const workspaces = managed ? response.workspaces.filter(item => item.tenantId === select.value) : response.workspaces;
 		formatList(get('workspaces'), workspaces, workspace => {
 			const row = element('li');
-			const link = element('a', workspace.id);
+			const link = element('a', workspace.name ?? workspace.id);
 			link.href = '/?' + new URLSearchParams({ l4sWorkspace: workspace.id });
 			row.append(link, ' · ' + workspaceRoleText(workspace.role));
 			return row;
@@ -209,6 +247,7 @@
 			if (failed) {
 				throw failed.reason;
 			}
+			if (managed) await loadManagedWorkspaces(base);
 			admin.hidden = false;
 		}
 		scope.hidden = false;
@@ -217,7 +256,15 @@
 	async function loadTenants(preferred) {
 		clearToken();
 		scope.hidden = true;
-		const { tenants } = await request(api);
+		const { tenants, platformAdmin } = await request(api);
+		if (managed) {
+			get('platform').hidden = !platformAdmin;
+			if (platformAdmin) {
+				const directory = await request(management + '/platform');
+				setAccountOptions(get('create-tenant').elements.initialAdminId, directory.accounts);
+				formatList(get('platform-tenants'), directory.tenants, tenant => element('li', tenant.name));
+			}
+		}
 		select.replaceChildren(...tenants.map(tenant => {
 			const option = new Option(tenant.name + ' · ' + roleText(tenant.role), tenant.tenantId);
 			option.dataset.role = tenant.role;
@@ -227,6 +274,74 @@
 			select.value = preferred;
 		}
 		return loadScope();
+	}
+
+	function setAccountOptions(field, accounts) {
+		field.replaceChildren(...accounts.map(account => new Option(account.username ?? account.userId, account.userId)));
+	}
+
+	async function loadWorkspaceGrants(base) {
+		const id = get('workspace-picker').value;
+		if (!id) {
+			formatList(get('workspace-grants'), [], () => undefined);
+			return;
+		}
+		const url = base + '/workspaces/' + encodeURIComponent(id) + '/members';
+		const { members } = await request(url);
+		formatList(get('workspace-grants'), members, member => {
+			const row = element('li');
+			row.className = 'row';
+			const name = member.username ?? member.userId;
+			const role = element('select');
+			role.setAttribute('aria-label', strings.role + ' · ' + name);
+			for (const [value, label] of [[0, 'noAccess'], [1, 'viewer'], [2, 'editor'], [3, 'owner']]) {
+				role.add(new Option(strings[label], String(value)));
+			}
+			role.value = String(member.role ?? 0);
+			row.append(element('span', name), role, button(strings.save, () => perform(async () => {
+				await request(url + '/' + encodeURIComponent(member.userId), 'PUT', {
+					role: Number(role.value) || null, expectedVersion: member.version ?? 0,
+				});
+				await loadScope();
+				return 'saved';
+			})));
+			return row;
+		});
+	}
+
+	async function loadManagedWorkspaces(base) {
+		const field = get('workspace-picker');
+		const previous = field.value;
+		const [{ workspaces }, { members }] = await Promise.all([
+			request(base + '/workspaces'), request(base + '/members'),
+		]);
+		setAccountOptions(get('create-workspace').elements.initialOwnerId, members);
+		field.replaceChildren(...workspaces.map(workspace => new Option(workspace.name, workspace.id)));
+		if (workspaces.some(workspace => workspace.id === previous)) field.value = previous;
+		await loadWorkspaceGrants(base);
+	}
+
+	if (managed) {
+		get('workspace-picker').addEventListener('change', () => perform(() => loadWorkspaceGrants(tenantUrl())));
+		for (const [formId, url] of [
+			['create-tenant', () => management + '/platform/tenants'],
+			['create-workspace', () => tenantUrl() + '/workspaces'],
+		]) {
+			let pending;
+			get(formId).addEventListener('submit', event => {
+				event.preventDefault();
+				const values = Object.fromEntries(new FormData(event.target));
+				const fingerprint = JSON.stringify([url(), values]);
+				if (pending?.fingerprint !== fingerprint) pending = { fingerprint, requestId: crypto.randomUUID() };
+				void perform(async () => {
+					await request(url(), 'POST', { ...values, requestId: pending.requestId });
+					pending = undefined;
+					event.target.reset();
+					await loadTenants(select.value);
+					return 'saved';
+				});
+			});
+		}
 	}
 
 	select.addEventListener('change', () => {
@@ -240,7 +355,7 @@
 		event.preventDefault();
 		void perform(async () => {
 			const base = tenantUrl();
-			const result = await request(base + '/invitations', 'POST', { email: get('email').value, role: get('invite-role').value });
+			const result = await request(base + '/invitations', 'POST', { email: get('email').value, role: managed ? (get('invite-role').value === 'admin' ? 2 : 1) : get('invite-role').value });
 			event.target.reset();
 			get('issued-token').value = result.token;
 			get('token-box').hidden = false;
@@ -251,7 +366,7 @@
 	get('accept').addEventListener('submit', event => {
 		event.preventDefault();
 		void perform(async () => {
-			const result = await request('/api/v1/invitations/accept', 'POST', { token: get('invite-input').value.trim() });
+			const result = await request((managed ? management + '/invitations/accept' : '/api/v1/invitations/accept'), 'POST', { token: get('invite-input').value.trim() });
 			event.target.reset();
 			await loadTenants(result.tenantId);
 			return 'saved';

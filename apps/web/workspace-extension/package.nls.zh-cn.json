@@ -1,7 +1,12 @@
 {
+  "knowledge.title": "知识关联",
+  "knowledge.refresh": "刷新知识关联",
+  "knowledge.reindex": "更新知识索引",
   "workspace.tenants": "租户管理",
   "workspace.displayName": "Log4Stellar 工作区",
   "workspace.preview": "预览文档",
   "workspace.previewVersion": "预览文档版本",
-  "workspace.officeEditor": "Log4Stellar Office 预览"
+  "workspace.officeEditor": "Log4Stellar Office 预览",
+  "workspace.upload": "上传附件",
+  "workspace.advancedSearch": "历史版本与附件搜索"
 }

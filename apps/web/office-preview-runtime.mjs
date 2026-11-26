@@ -71,21 +71,24 @@ export async function openOfficePreviewRuntime({ environment = process.env, cach
 		 * compete with request handling for memory. Offered here for a single box deployment
 		 * and for tests.
 		 */
-		startWorker({ workspaceId, idleMs = 1000 } = {}) {
+		startWorker({ idleMs = 1000 } = {}) {
 			if (!workspaces) {
 				throw new Error('The preview worker needs a workspace backend cache.');
 			}
 			const workerId = 'office-preview-worker-' + process.pid;
 			// The backend lease is acquired and released per cycle, so the workspace cache is
 			// never pinned by an idle worker.
-			const openOriginal = openOriginalFor(id => workspaces.acquire(id), limits);
 			let stopped = false;
 			const running = (async () => {
 				while (!stopped) {
-					let leased = false;
+					let leasedWorkspace;
 					try {
 						const { store, blobs } = await open();
-						leased = true;
+						const openOriginal = openOriginalFor(async id => {
+							const backend = await workspaces.acquire(id);
+							leasedWorkspace = id;
+							return backend;
+						}, limits);
 						const outcome = await runPreviewCycle({
 							store,
 							blobs,
@@ -104,8 +107,8 @@ export async function openOfficePreviewRuntime({ environment = process.env, cach
 						logger?.({ event: 'office-preview-cycle-failed', error: error.code ?? error.message });
 						await sleep(idleMs);
 					} finally {
-						if (leased) {
-							workspaces.release(workspaceId);
+						if (leasedWorkspace) {
+							workspaces.release(leasedWorkspace);
 						}
 					}
 				}

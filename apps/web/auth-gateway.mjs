@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import { managedWorkspacePath, serveManagedWorkspaceRequest } from './managed-workspace-files.mjs';
 import { tenantManagementPage } from './tenant-management-page.mjs';
 import { accountSecurityPage } from './account-security-page.mjs';
 import {
@@ -13,17 +14,24 @@ import {
 } from './account-security.mjs';
 import { challengeCookieName, clearedChallengeCookie, clearedSessionCookie, readCookie } from './account-security-runtime.mjs';
 import { loginPage, secondFactorPage, webColorScheme } from './login-page.mjs';
-import { WorkspaceError, isValidWorkspaceId } from './workspace-contract.mjs';
-import { authorizeWorkspace } from './workspace-access.mjs';
+import { WorkspaceError, isValidWorkspaceId, normalizeWorkspacePath } from './workspace-contract.mjs';
+import { allowsWorkspace, authorizeWorkspace, workspaceCapabilities } from './workspace-access.mjs';
 import { syncPath, serveSyncRequest } from './sync-files.mjs';
 import { gitPath, serveGitRequest } from './git-files.mjs';
 import { knowledgeMountPath, serveKnowledgeRequest } from './knowledge-files.mjs';
 import { officePreviewPath, serveOfficePreviewRequest } from './office-preview-files.mjs';
+import { uploadApiPath, uploadPagePath } from './resumable-uploads.mjs';
+import { uploadsPage } from './uploads-page.mjs';
 import { mountPath, serveWorkspaceFile } from './workspace-files.mjs';
 import { isOfflineRequest, serveOfflineRequest } from './offline-files.mjs';
 import { searchPath, serveSearchRequest } from './search-files.mjs';
 import { invitationAcceptPath, serveTenantRequest, tenantPath } from './tenant-files.mjs';
 
+import { extendedSearchPagePath, extendedSearchPath } from './extended-search.mjs';
+import { extendedSearchPage } from './extended-search-page.mjs';
+
+const extendedSearchClient = await readFile(new URL('./extended-search-client.js', import.meta.url), 'utf8');
+const uploadsClient = await readFile(new URL('./uploads-client.js', import.meta.url), 'utf8');
 const sessionClient = await readFile(new URL('./session-client.js', import.meta.url), 'utf8');
 const accountSecurityClient = await readFile(new URL('./account-security-client.js', import.meta.url), 'utf8');
 const tenantManagementClient = await readFile(new URL('./tenant-management-client.js', import.meta.url), 'utf8');
@@ -73,13 +81,12 @@ async function readForm(ctx) {
  * failure path is the same 403 so a non-member cannot tell "not a member" from
  * "no such workspace" (contract §5).
  */
-async function resolveWorkspace(ctx, session, { defaultWorkspaceId, resolveRole, workspaces, allowsMappedWorkspace }) {
-	const requested = ctx.get(workspaceHeader);
-	const workspaceId = requested ? requested.toLowerCase() : defaultWorkspaceId(session.user.id);
+async function resolveWorkspace(ctx, session, { defaultWorkspaceId, resolveRole, workspaces, allowsMappedWorkspace, requested = ctx.get(workspaceHeader) }) {
+	const workspaceId = typeof requested === 'string' && requested ? requested.toLowerCase() : await defaultWorkspaceId(session.user.id);
 	if (!workspaceId || !isValidWorkspaceId(workspaceId)) {
 		return undefined;
 	}
-	const role = resolveRole(session.user.id, workspaceId);
+	const role = await resolveRole(session.user.id, workspaceId);
 	if (role === undefined || !await allowsMappedWorkspace(session.user.id, workspaceId)) {
 		return undefined;
 	}
@@ -104,17 +111,17 @@ function routeParameters(pathname) {
 // /api/v1/office-previews, and the four `tenant*` options gate /api/v1/tenants. A
 // deployment that does not pass one gets a 404 from that mount rather than an
 // unauthenticated route, which is why they default to undefined instead of throwing.
-export function authGateway({ auth, origin, canReadWorkspace, matchesWorkspaceAccount, defaultWorkspaceId, workspacesOf, resolveRole, workspaces, openGitBackend, openKnowledgeStore, openOfficePreview, resolveChallenge, accountSecurity, tenants, readWorkspaceMapping, isPlatformAdmin, createTenantRecord }, maxUploadBytes, localeOf, webviewHost) {
+export function authGateway({ auth, origin, canReadWorkspace, matchesWorkspaceAccount, defaultWorkspaceId, workspacesOf, resolveRole, workspaces, openGitBackend, openKnowledgeStore, openOfficePreview, resolveChallenge, accountSecurity, tenants, readWorkspaceMapping, isPlatformAdmin, createTenantRecord, managedWorkspaces, resumableUploads, extendedSearch, hasSecondFactor }, maxUploadBytes, localeOf, webviewHost) {
 	async function allowsMappedWorkspace(userId, workspaceId) {
 		const mapping = await readWorkspaceMapping?.(workspaceId);
 		if (!mapping) {
-			return true;
+			return !managedWorkspaces;
 		}
 		if (mapping.status !== 'active' || !tenants) {
 			return false;
 		}
 		try {
-			tenants.describeMembership(userId, mapping.tenantId);
+			await tenants.describeMembership(userId, mapping.tenantId);
 			return true;
 		} catch (error) {
 			if (error.status === 404) {
@@ -197,6 +204,14 @@ export function authGateway({ auth, origin, canReadWorkspace, matchesWorkspaceAc
 		}
 
 		const mounted = ctx.path === mountPath || ctx.path.startsWith(mountPath + '/');
+		const uploading = ctx.path === uploadApiPath || ctx.path.startsWith(uploadApiPath + '/');
+		const uploadingPage = ctx.path === uploadPagePath;
+		const extendedPage = ctx.path === extendedSearchPagePath;
+		if (ctx.path === '/advanced-search.js' && extendedSearch && ctx.method === 'GET') {
+			ctx.type = 'application/javascript';
+			ctx.body = extendedSearchClient;
+			return;
+		}
 		const syncing = ctx.path === syncPath || ctx.path.startsWith(syncPath + '/');
 		const gitting = ctx.path === gitPath || ctx.path.startsWith(gitPath + '/');
 		const searching = ctx.path === searchPath || ctx.path.startsWith(searchPath + '/');
@@ -223,9 +238,17 @@ export function authGateway({ auth, origin, canReadWorkspace, matchesWorkspaceAc
 		// The tenant API is a sibling of the workspace mounts, not a child: it addresses a
 		// tenant, which is above any workspace, so it cannot be routed by the workspace
 		// header the mounts use.
+		const managedRequest = Boolean(managedWorkspaces && (ctx.path === managedWorkspacePath || ctx.path.startsWith(managedWorkspacePath + '/')));
 		const tenancy = ctx.path === tenantPath || ctx.path.startsWith(tenantPath + '/')
 			|| ctx.path === invitationAcceptPath;
 		const authApiCall = ctx.path === securityPaths.authApi || ctx.path.startsWith(securityPaths.authApi + '/');
+		if (ctx.path === '/uploads.js' && ctx.method === 'GET') {
+			ctx.type = 'js';
+			ctx.set('Cache-Control', 'no-store');
+			ctx.set('X-Content-Type-Options', 'nosniff');
+			ctx.body = uploadsClient;
+			return;
+		}
 		if (ctx.path === securityPaths.sessionClient && ctx.method === 'GET') {
 			ctx.type = 'js';
 			ctx.set('Cache-Control', 'no-store');
@@ -249,8 +272,8 @@ export function authGateway({ auth, origin, canReadWorkspace, matchesWorkspaceAc
 		// Every non-application mount must appear here. A mount missing from this condition
 		// is served the workbench instead of its handler, which looks like a broken route
 		// rather than a routing bug, so the list is kept in the order the booleans are built.
-		if (!login && !api && !accountSettings && !mounted && !workbench && !syncing && !gitting
-			&& !searching && !knowing && !officePreviewing && !tenancy && !accountSecurityCall && !authApiCall) {
+		if (!login && !api && !accountSettings && !mounted && !workbench && !syncing && !gitting && !uploading && !uploadingPage && !extendedPage
+			&& !searching && !knowing && !officePreviewing && !tenancy && !managedRequest && !accountSecurityCall && !authApiCall) {
 			await next();
 			// Permit isolated Markdown webviews to load bundled scripts and styles.
 			// Workspace files and session endpoints stay outside this CORS rule.
@@ -357,7 +380,7 @@ export function authGateway({ auth, origin, canReadWorkspace, matchesWorkspaceAc
 					return;
 				}
 				const { user } = payload;
-				if (!canReadWorkspace(user.id)) {
+				if (!managedWorkspaces && !await canReadWorkspace(user.id)) {
 					// Invalidate the session created by the authentication library before returning.
 					const cookie = response.headers.getSetCookie().map(value => value.split(';', 1)[0]).join('; ');
 					const headers = new Headers({ Cookie: cookie, Origin: origin.origin });
@@ -380,7 +403,7 @@ export function authGateway({ auth, origin, canReadWorkspace, matchesWorkspaceAc
 		}
 
 		if (login) {
-			if (session && canReadWorkspace(session.user.id)) {
+			if (session && (managedWorkspaces || await canReadWorkspace(session.user.id))) {
 				redirect(ctx, workbenchPath);
 			} else if (authState.state === authStates.half) {
 				showSecondFactor(ctx, localeOf(ctx));
@@ -407,11 +430,16 @@ export function authGateway({ auth, origin, canReadWorkspace, matchesWorkspaceAc
 				scheme: ctx.cookies.get('log4stellar.color-scheme'),
 				accountId: session.user.id,
 				twoFactorEnabled: session.user.twoFactorEnabled,
+				managed: Boolean(managedWorkspaces),
 			});
 			ctx.status = 200;
 			return;
 		}
 
+		if ((uploadingPage || extendedPage) && authState.state !== authStates.full) {
+			redirect(ctx, authState.state === authStates.half ? twoFactorPendingRedirect : loginPath);
+			return;
+		}
 		// The single authorization gate (§5.3). It runs before any body is read and
 		// before a workspace backend is acquired, which is what makes the refusal
 		// uniform: a half-authenticated caller cannot turn a mount into a 404 or a
@@ -437,7 +465,7 @@ export function authGateway({ auth, origin, canReadWorkspace, matchesWorkspaceAc
 			// Abandoning a challenge is allowed: the browser throws away a cookie
 			// that has no session behind it.
 			if (authState.state === authStates.half) {
-				accountSecurity?.clearChallenge?.(challenge.identifier);
+				await accountSecurity?.clearChallenge?.(challenge.identifier);
 				ctx.status = 200;
 				sendCookie(clearedChallengeCookie());
 				ctx.body = { ok: true };
@@ -472,7 +500,16 @@ export function authGateway({ auth, origin, canReadWorkspace, matchesWorkspaceAc
 			return;
 		}
 
-		if (tenancy) {
+		let secondFactor;
+		const verifiedSecondFactor = () => secondFactor ??= Promise.resolve(hasSecondFactor?.(session) ?? false);
+		async function canAccessWorkspace(userId, workspaceId) {
+			if (!await allowsMappedWorkspace(userId, workspaceId)) return false;
+			if (!managedWorkspaces) return true;
+			const mapping = await readWorkspaceMapping(workspaceId);
+			return Boolean(mapping) && (!await managedWorkspaces.requiresSecondFactor(mapping.tenantId) || await verifiedSecondFactor());
+		}
+
+		if (tenancy || managedRequest) {
 			// The tenant API requires a full session: a half-authenticated caller holds a
 			// challenge cookie and no principal, and every route below keys its decision on
 			// `session.user.id`. `authorizeRequest` above already refused anything but a full
@@ -485,6 +522,14 @@ export function authGateway({ auth, origin, canReadWorkspace, matchesWorkspaceAc
 			if (expected && expected !== session.user.id) {
 				ctx.status = 409;
 				ctx.body = { error: 'AccountChanged' };
+				return;
+			}
+			if (managedRequest) {
+				await serveManagedWorkspaceRequest(ctx, { store: managedWorkspaces, principalId: session.user.id, hasSecondFactor: verifiedSecondFactor });
+				return;
+			}
+			if (managedWorkspaces) {
+				ctx.status = 404;
 				return;
 			}
 			await serveTenantRequest(ctx, {
@@ -501,20 +546,20 @@ export function authGateway({ auth, origin, canReadWorkspace, matchesWorkspaceAc
 
 		const signOut = ctx.path === '/api/session/logout' && ctx.method === 'POST';
 		const activity = ctx.path === '/api/session/activity' && ctx.method === 'POST';
-		if ((!reading && !activity && !signOut && !mounted && !syncing && !gitting && !searching && !knowing && !officePreviewing)
+		if ((!reading && !activity && !signOut && !mounted && !syncing && !gitting && !uploading && !searching && !knowing && !officePreviewing)
 			|| (api && ctx.path !== '/api/session' && !activity && !signOut)) {
 			ctx.status = 405;
 			return;
 		}
-		if (!mounted && !syncing && !gitting && !searching && !knowing && !officePreviewing && !canReadWorkspace(session.user.id)) {
+		if (!mounted && !syncing && !gitting && !uploading && !uploadingPage && !extendedPage && !searching && !knowing && !officePreviewing && !managedWorkspaces && !await canReadWorkspace(session.user.id)) {
 			ctx.status = 403;
 			return;
 		}
 		const expectedAccount = ctx.get('X-Log4Stellar-Account');
 		// Already open workbenches may still send their URI authority in the old header.
-		const workspaceAccount = mounted || syncing || gitting || searching || knowing || officePreviewing ? ctx.get('X-Log4Stellar-Workspace-Account') || expectedAccount.toLowerCase() : '';
-		const mismatchedSession = api && expectedAccount && expectedAccount !== session.user.id;
-		const mismatchedWorkspace = workspaceAccount && !matchesWorkspaceAccount(session.user.id, workspaceAccount);
+		const workspaceAccount = mounted || syncing || gitting || uploading || uploadingPage || extendedPage || searching || knowing || officePreviewing ? ctx.get('X-Log4Stellar-Workspace-Account') || expectedAccount.toLowerCase() : '';
+		const mismatchedSession = (api || uploading) && expectedAccount && expectedAccount !== session.user.id;
+		const mismatchedWorkspace = workspaceAccount && !await matchesWorkspaceAccount(session.user.id, workspaceAccount);
 		if (mismatchedSession || mismatchedWorkspace) {
 			ctx.status = 409;
 			ctx.body = { error: 'AccountChanged' };
@@ -541,12 +586,12 @@ export function authGateway({ auth, origin, canReadWorkspace, matchesWorkspaceAc
 		}
 		if (api) {
 			const workspaces = [];
-			for (const workspace of workspacesOf(session.user.id)) {
-				if (await allowsMappedWorkspace(session.user.id, workspace.id)) {
+			for (const workspace of await workspacesOf(session.user.id)) {
+				if (await canAccessWorkspace(session.user.id, workspace.id)) {
 					workspaces.push(workspace);
 				}
 			}
-			const defaultId = defaultWorkspaceId(session.user.id);
+			const defaultId = await defaultWorkspaceId(session.user.id);
 			ctx.state.workspaceId = workspaces.find(workspace => workspace.id === defaultId)?.id ?? workspaces[0]?.id;
 			ctx.body = {
 				remainingMs: Math.max(0, Date.parse(session.session.expiresAt) - Date.now()),
@@ -554,10 +599,13 @@ export function authGateway({ auth, origin, canReadWorkspace, matchesWorkspaceAc
 				workspaceId: ctx.state.workspaceId,
 				workspaces,
 			};
-		} else if (mounted || syncing || gitting || searching || knowing || officePreviewing) {
+		} else if (mounted || syncing || gitting || uploading || uploadingPage || extendedPage || searching || knowing || officePreviewing) {
 			// Mounted file, sync, search, knowledge and preview requests are authorized per
 			// workspace, not by the login gate.
-			const target = await resolveWorkspace(ctx, session, { defaultWorkspaceId, resolveRole, workspaces, allowsMappedWorkspace });
+			const target = await resolveWorkspace(ctx, session, {
+				defaultWorkspaceId, resolveRole, workspaces, allowsMappedWorkspace: canAccessWorkspace,
+				...(uploadingPage || extendedPage ? { requested: ctx.query.l4sWorkspace } : {}),
+			});
 			if (!target) {
 				ctx.body = { error: 'NoPermissions' };
 				ctx.status = 403;
@@ -574,10 +622,56 @@ export function authGateway({ auth, origin, canReadWorkspace, matchesWorkspaceAc
 				const workspace = gitBackend
 					? authorizeWorkspace(gitBackend, { role: target.role })
 					: authorizeWorkspace(target.backend, { role: target.role });
-				if (gitting) {
+				if (uploading || uploadingPage) {
+					try {
+						if (!allowsWorkspace(target.role, workspaceCapabilities.write)) {
+							throw new WorkspaceError(403, 'NoPermissions');
+						}
+						if (!resumableUploads || typeof target.backend.syncPutFile !== 'function') {
+							throw new WorkspaceError(501, 'UploadUnavailable');
+						}
+						if (uploadingPage) {
+							const directory = normalizeWorkspacePath(typeof ctx.query.directory === 'string' ? ctx.query.directory : '/');
+							ctx.type = 'html';
+							ctx.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'");
+							ctx.body = uploadsPage({ locale: localeOf(ctx), theme: webColorScheme(ctx.cookies.get('log4stellar.color-scheme')),
+								account: session.user.id, workspaceId: target.id, directory, maxBytes: maxUploadBytes });
+							ctx.status = 200;
+						} else {
+							await resumableUploads.handle(ctx, { workspaceId: target.id, accountId: session.user.id, backend: target.backend });
+						}
+					} catch (error) {
+						if (!(error instanceof WorkspaceError)) throw error;
+						ctx.body = { error: error.code };
+						ctx.status = error.status;
+					}
+				} else if (gitting) {
 					await serveGitRequest(ctx, workspace, gitBackend, target.id, maxUploadBytes);
 				} else if (syncing) {
 					await serveSyncRequest(ctx, workspace, target.backend, target.id, maxUploadBytes);
+				} else if (extendedPage || ctx.path === extendedSearchPath) {
+					try {
+						workspace.require(workspaceCapabilities.history);
+						if (!extendedSearch || typeof target.backend.openRevision !== 'function') {
+							throw new WorkspaceError(501, 'SearchUnavailable');
+						}
+						if (extendedPage) {
+							ctx.type = 'html';
+							ctx.set('Cache-Control', 'no-store');
+							ctx.set('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'");
+							ctx.body = extendedSearchPage({ locale: localeOf(ctx), workspaceId: target.id });
+						} else {
+							if (ctx.method !== 'GET') throw new WorkspaceError(405, 'MethodNotAllowed');
+							ctx.set('Cache-Control', 'no-store');
+							ctx.body = await extendedSearch.search({ workspaceId: target.id, backend: workspace,
+								scope: ctx.query.scope, q: ctx.query.q, cursor: ctx.query.cursor });
+						}
+					} catch (error) {
+						if (!(error instanceof WorkspaceError)) throw error;
+						if (error.code === 'SearchBusy') ctx.set('Retry-After', '2');
+						ctx.body = { error: error.code };
+						ctx.status = error.status;
+					}
 				} else if (searching) {
 					await serveSearchRequest(ctx, workspace, target.backend, target.id, maxUploadBytes);
 				} else if (knowing) {
@@ -614,17 +708,21 @@ export function authGateway({ auth, origin, canReadWorkspace, matchesWorkspaceAc
 				}
 			}
 		} else {
-			let selectedWorkspaceId = defaultWorkspaceId(session.user.id);
+			let selectedWorkspaceId = await defaultWorkspaceId(session.user.id);
 			if (ctx.path === '/' && ctx.query.l4sWorkspace !== undefined) {
 				const requested = ctx.query.l4sWorkspace;
-				if (!isValidWorkspaceId(requested) || !resolveRole(session.user.id, requested)) {
+				if (!isValidWorkspaceId(requested) || !await resolveRole(session.user.id, requested)) {
 					ctx.status = 403;
 					ctx.body = { error: 'NoPermissions' };
 					return;
 				}
 				selectedWorkspaceId = requested;
 			}
-			if (workbench && selectedWorkspaceId && !await allowsMappedWorkspace(session.user.id, selectedWorkspaceId)) {
+			if (workbench && managedWorkspaces && !selectedWorkspaceId) {
+				redirect(ctx, tenantManagementPath);
+				return;
+			}
+			if (workbench && selectedWorkspaceId && !await canAccessWorkspace(session.user.id, selectedWorkspaceId)) {
 				if (ctx.query.l4sWorkspace === undefined) {
 					redirect(ctx, tenantManagementPath);
 				} else {

@@ -11,10 +11,8 @@
     "@node-rs/argon2": "2.2.2",
     "@vscode/test-web": "0.0.81",
     "better-auth": "1.7.27",
+    "pdfjs-dist": "6.5.438",
     "pg": "8.23.1",
     "qrcode-generator": "2.0.4"
-  },
-  "devDependencies": {
-    "pdfjs-dist": "6.5.438"
   }
 }

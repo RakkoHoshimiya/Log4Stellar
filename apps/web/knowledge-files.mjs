@@ -12,8 +12,9 @@
 // storage backend cannot commit several notes and their objects in one transaction and a partial
 // rewrite reported as success is worse than no rewrite at all (docs/knowledge-links.md §4).
 
+import { createHash } from 'node:crypto';
 import { linkStatuses } from './knowledge-parser.mjs';
-import { applyLinkRewrite, planLinkRewrite, rebuildKnowledgeIndex } from './knowledge-indexer.mjs';
+import { applyLinkRewrite, catchUpKnowledgeIndex, planLinkRewrite, rebuildKnowledgeIndex } from './knowledge-indexer.mjs';
 import {
 	decodeKnowledgeCursor,
 	encodeKnowledgeCursor,
@@ -140,7 +141,20 @@ function pageFrom(rows, workspaceId, kind, limit) {
 
 async function backlinks(ctx, store, workspaceId) {
 	requireStore(store, 'listBacklinks');
-	const fileId = requireIdentifier(queryString(ctx, 'fileId') ?? '', 'InvalidFileId');
+	let fileId = queryString(ctx, 'fileId');
+	const path = queryString(ctx, 'path');
+	if (fileId !== undefined && path !== undefined) {
+		throw new WorkspaceError(400, 'InvalidRequest');
+	}
+	if (path !== undefined) {
+		requireStore(store, 'readFileByPath');
+		const entry = await store.readFileByPath(workspaceId, normalizeWorkspacePath(path));
+		if (!entry) {
+			throw new WorkspaceError(404, 'FileNotFound');
+		}
+		fileId = entry.file_id;
+	}
+	fileId = requireIdentifier(fileId ?? '', 'InvalidFileId');
 	const limit = knowledgePageSize(queryString(ctx, 'limit'));
 	const rawCursor = queryString(ctx, 'cursor');
 	const cursor = rawCursor === undefined
@@ -164,11 +178,28 @@ async function sourceLinks(ctx, store, workspaceId) {
 	ctx.body = { fileId, links, nextCursor };
 }
 
+function tagCursor(ctx, workspaceId, route, filter, orderLength) {
+	const kind = route + ':' + createHash('sha256').update(JSON.stringify(filter)).digest('base64url').slice(0, 22);
+	const raw = queryString(ctx, 'cursor');
+	const after = raw === undefined ? undefined : decodeKnowledgeCursor(raw, { workspaceId, kind });
+	if (after && (!after.path || after.order.length !== orderLength
+		|| after.order.some(value => !Number.isInteger(value) || value < 1 || value > 2_147_483_647))) {
+		throw new WorkspaceError(400, 'InvalidCursor');
+	}
+	return { kind, after };
+}
+
 async function tags(ctx, store, workspaceId) {
 	requireStore(store, 'listTags');
-	const prefix = queryString(ctx, 'prefix');
+	const prefix = (queryString(ctx, 'prefix') ?? '').toLowerCase();
 	const limit = knowledgePageSize(queryString(ctx, 'limit'));
-	ctx.body = { tags: await store.listTags(workspaceId, { prefix, limit }) };
+	const { kind, after } = tagCursor(ctx, workspaceId, 'tags', prefix, 0);
+	const items = await store.listTags(workspaceId, { prefix, after: after?.path, limit: limit + 1 });
+	const tags = items.slice(0, limit);
+	const nextCursor = items.length > limit
+		? encodeKnowledgeCursor({ workspaceId, kind, path: tags.at(-1).tagKey, order: [] })
+		: null;
+	ctx.body = { tags, nextCursor };
 }
 
 async function tagOccurrences(ctx, store, workspaceId, tagKey) {
@@ -178,8 +209,16 @@ async function tagOccurrences(ctx, store, workspaceId, tagKey) {
 	if (!tagKey) {
 		throw new WorkspaceError(400, 'InvalidRequest');
 	}
-	const key = decodeURIComponent(tagKey);
-	ctx.body = { tagKey: key, occurrences: await store.listTagOccurrences(workspaceId, key, { includeChildren, limit }) };
+	const key = decodeURIComponent(tagKey).toLowerCase();
+	const { kind, after } = tagCursor(ctx, workspaceId, 'tag-occurrences', [key, includeChildren], 2);
+	const rows = await store.listTagOccurrences(workspaceId, key, { includeChildren, after, limit: limit + 1 });
+	const occurrences = rows.slice(0, limit);
+	let nextCursor = null;
+	if (rows.length > limit) {
+		const last = occurrences.at(-1);
+		nextCursor = encodeKnowledgeCursor({ workspaceId, kind, path: last.path, order: [last.line, last.column] });
+	}
+	ctx.body = { tagKey: key, occurrences, nextCursor };
 }
 
 async function broken(ctx, store, workspaceId) {
@@ -193,7 +232,7 @@ async function broken(ctx, store, workspaceId) {
 	const cursor = rawCursor === undefined
 		? undefined
 		: decodeKnowledgeCursor(rawCursor, { workspaceId, kind: 'broken' });
-	const links = await store.listUnresolvedLinks(workspaceId, { cursor, limit, status });
+	const links = await store.listUnresolvedLinks(workspaceId, { cursor, limit, status, excludeExternal: queryString(ctx, 'excludeExternal') === '1' });
 	const { nextCursor } = pageFrom(links, workspaceId, 'broken', limit);
 	ctx.body = { links, nextCursor };
 }
@@ -244,6 +283,13 @@ export async function serveKnowledgeRequest(ctx, workspace, backend, workspaceId
 			return;
 		}
 		workspace.require(capability);
+
+		const readsIndex = pathname === knowledgeRoutes.backlinks || pathname === knowledgeRoutes.links
+			|| pathname === knowledgeRoutes.tags || pathname.startsWith(knowledgeRoutes.tags + '/')
+			|| pathname === knowledgeRoutes.broken;
+		if (readsIndex && ctx.method === 'GET' && !queryString(ctx, 'cursor')) {
+			await catchUpKnowledgeIndex({ workspaceId, backend, store });
+		}
 
 		if (pathname === knowledgeRoutes.backlinks) {
 			await backlinks(ctx, store, workspaceId);

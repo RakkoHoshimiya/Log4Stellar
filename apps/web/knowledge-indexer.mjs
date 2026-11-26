@@ -244,7 +244,7 @@ export async function updateKnowledgeIndex(scope, fileId, revision, { force = fa
 	const body = await readBody(scope.backend, path, revisionId);
 	const described = await describeNoteIndex(scope, { path, fileId, revisionId, body });
 	const write = async (connection) => {
-		await scope.store.replaceFileIndex(connection, {
+		return scope.store.replaceFileIndex(connection, {
 			workspaceId: scope.workspaceId,
 			fileId,
 			revisionId,
@@ -254,10 +254,9 @@ export async function updateKnowledgeIndex(scope, fileId, revision, { force = fa
 			indexedAt: Date.now(),
 		});
 	};
-	if (scope.connection) {
-		await write(scope.connection);
-	} else {
-		await scope.store.transaction(write);
+	const written = scope.connection ? await write(scope.connection) : await scope.store.transaction(write);
+	if (written === false) {
+		return { fileId, revisionId, indexed: false, reason: 'changed' };
 	}
 	return {
 		fileId,
@@ -270,24 +269,66 @@ export async function updateKnowledgeIndex(scope, fileId, revision, { force = fa
 	};
 }
 
+const incrementalBatchSize = 8;
+const incrementalRuns = new WeakMap();
+
+/**
+ * Catch up derived rows when a reader opens the panel. The committed entries
+ * are the source of work, so a restart does not discard pending revisions.
+ */
+export async function catchUpKnowledgeIndex(scope) {
+	const { store, workspaceId } = scope;
+	if (!store?.listStaleNotes) {
+		return;
+	}
+	let runs = incrementalRuns.get(store);
+	if (!runs) {
+		runs = new Map();
+		incrementalRuns.set(store, runs);
+	}
+	let state = runs.get(workspaceId);
+	if (!state) {
+		state = { after: '', pending: undefined };
+		runs.set(workspaceId, state);
+	}
+	if (!state.pending) {
+		state.pending = (async () => {
+			let batch = await store.listStaleNotes(workspaceId, state.after, incrementalBatchSize);
+			if (!batch.length && state.after) {
+				state.after = '';
+				batch = await store.listStaleNotes(workspaceId, '', incrementalBatchSize);
+			}
+			for (const row of batch) {
+				try {
+					await updateKnowledgeIndex(scope, row.fileId, row);
+				} catch {
+					// A failed file remains stale. Continue and retry when the scan wraps.
+				}
+			}
+			state.after = batch.length === incrementalBatchSize ? batch.at(-1).path : '';
+		})().finally(() => { state.pending = undefined; });
+	}
+	await state.pending;
+}
+
 /**
  * Brings the whole workspace index up to date. Files whose indexed revision already matches the
  * live revision are skipped, so this is cheap to run after a restore, an import or a restart,
  * and it converges from an empty or half-written index.
  */
 export async function rebuildKnowledgeIndex(scope, { force = false, limit = Number.POSITIVE_INFINITY } = {}) {
-	const files = await scope.store.listLiveFiles(scope.workspaceId);
+	const files = (await scope.store.listLiveFiles(scope.workspaceId)).filter(file => /\.(?:md|markdown|mdown|mkdn|mkd|mdwn|mdtxt|mdtext)$/i.test(file.path));
 	const report = { considered: files.length, indexed: 0, skipped: 0, failed: [], links: 0, tags: 0 };
 	let seen = 0;
 	for (const file of files) {
-		if (seen >= limit) {
-			break;
-		}
-		seen++;
 		if (!force && file.indexedRevisionId === file.revisionId && file.parserVersion === knowledgeParserVersion) {
 			report.skipped++;
 			continue;
 		}
+		if (seen >= limit) {
+			break;
+		}
+		seen++;
 		try {
 			const result = await updateKnowledgeIndex(scope, file.fileId, {
 				path: file.path,

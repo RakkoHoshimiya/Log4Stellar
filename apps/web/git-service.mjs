@@ -277,6 +277,9 @@ export function createGitBackend({ workspaceId, actor, storage, environment = pr
 					url: remote.url,
 					credential,
 					allowFile: remote.allowFile,
+					knownHosts: environment.LOG4STELLAR_GIT_SSH_KNOWN_HOSTS,
+					tlsCaFile: environment.LOG4STELLAR_GIT_HTTPS_CA_FILE,
+					httpsUsername: environment.LOG4STELLAR_GIT_HTTPS_USERNAME,
 					timeoutMs: gitTimeoutMs(environment),
 				});
 				const remoteCommit = await refCommit(opened, 'refs/remotes/' + remoteLabel + '/' + record.remote_branch);
@@ -327,6 +330,9 @@ export function createGitBackend({ workspaceId, actor, storage, environment = pr
 					expectedRemote: expected,
 					credential,
 					allowFile: remote.allowFile,
+					knownHosts: environment.LOG4STELLAR_GIT_SSH_KNOWN_HOSTS,
+					tlsCaFile: environment.LOG4STELLAR_GIT_HTTPS_CA_FILE,
+					httpsUsername: environment.LOG4STELLAR_GIT_HTTPS_USERNAME,
 					timeoutMs: gitTimeoutMs(environment),
 				});
 				await (await store()).recordPush(workspaceId, { commit, now: nowMs() });

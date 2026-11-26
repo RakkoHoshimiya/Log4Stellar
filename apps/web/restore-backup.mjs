@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { selectTenantStorage, tenantStorageProfiles } from './tenant-storage.mjs';
 // Restore a backup produced by `backup-data.mjs` into an operator-chosen target.
 //
 // The order of operations is the whole point of this file:
@@ -48,10 +49,11 @@ async function sha256File(file) {
 export function assertRestoreTargetIsSeparate(manifest, target) {
 	const origin = manifest.origin ?? {};
 	const problems = [];
-	if (target.s3 && origin.s3) {
-		const sameEndpoint = normalizeEndpoint(target.s3.endpoint) === normalizeEndpoint(origin.s3.endpoint);
-		if (sameEndpoint && target.s3.bucket === origin.s3.bucket) {
-			problems.push('storage: ' + target.s3.endpoint + '/' + target.s3.bucket + ' is the backed-up bucket');
+	const sourceBuckets = [origin.s3, ...Object.values(origin.tenantStorage ?? {})].filter(Boolean);
+	for (const destination of [target.s3, ...Object.values(target.tenantStorage ?? {})].filter(Boolean)) {
+		if (sourceBuckets.some(source => normalizeEndpoint(destination.endpoint) === normalizeEndpoint(source.endpoint)
+			&& destination.bucket === source.bucket)) {
+			problems.push('storage: ' + destination.endpoint + '/' + destination.bucket + ' is the backed-up bucket');
 		}
 	}
 	if (target.postgres && origin.postgres) {
@@ -102,13 +104,15 @@ export async function restoreToDirectory(verified, targetDir) {
 	}
 	await mkdir(directory, { recursive: true, mode: 0o700 });
 	const restored = {};
-	const sqliteSource = await requirePlaintext(plaintext, 'auth.sqlite', 'account database');
 	const gitSecretSource = await requirePlaintext(plaintext, 'git-secret', 'Git sealing key');
 	const secretSource = await requirePlaintext(plaintext, 'secret', 'account signing secret');
 	const dumpSource = await requirePlaintext(plaintext, 'log4stellar.sql', 'PostgreSQL dump');
-	const authTarget = path.join(directory, 'auth.sqlite');
-	await copyFile(sqliteSource, authTarget);
-	restored.auth = { path: authTarget, sha256: await sha256File(authTarget) };
+	if (verified.manifest?.accountStorage !== 'postgres') {
+		const sqliteSource = await requirePlaintext(plaintext, 'auth.sqlite', 'account database');
+		const authTarget = path.join(directory, 'auth.sqlite');
+		await copyFile(sqliteSource, authTarget);
+		restored.auth = { path: authTarget, sha256: await sha256File(authTarget) };
+	}
 
 	for (const [name, source] of [['secret', secretSource], ['git-secret', gitSecretSource]]) {
 		const target = path.join(directory, name);
@@ -215,7 +219,8 @@ export async function inspectSqlDump(dumpPath) {
  * @param {string} [options.spool]
  */
 export async function restoreObjectBytes(verified, options) {
-	assertRestoreTargetIsSeparate(verified.manifest, { s3: options.s3 });
+	const profiles = tenantStorageProfiles(options);
+	assertRestoreTargetIsSeparate(verified.manifest, { s3: options.s3, tenantStorage: profiles });
 	const entries = verified.objects.entries;
 	if (entries.length === 0) {
 		return { restored: 0, bytes: 0, verified: 0 };
@@ -235,7 +240,7 @@ export async function restoreObjectBytes(verified, options) {
 		for (const entry of entries) {
 			let blobs = byWorkspace.get(entry.workspaceId);
 			if (!blobs) {
-				blobs = await openBlobs(options.s3, entry.workspaceId, spool);
+				blobs = await openBlobs(selectTenantStorage(options.s3, profiles, entry.tenantId), entry.workspaceId, spool, { tenantId: entry.tenantId });
 				byWorkspace.set(entry.workspaceId, blobs);
 			}
 			const envelope = path.join(verified.backupDir, verified.objects.directory, entry.workspaceId, entry.sha256 + '.enc');
@@ -314,12 +319,21 @@ export async function restoreToServices(verified, options) {
 	if (typeof options.postgres.ssl === 'boolean') {
 		env.PGSSLMODE = options.postgres.ssl ? 'verify-full' : 'disable';
 	}
+	if (options.dropSchema && verified.manifest.accountStorage === 'postgres') {
+		throw new RestoreTargetError('Managed backups require an empty database.', { code: 'ManagedRestoreRequiresEmptyDatabase' });
+	}
 	if (options.dropSchema) {
 		log('Dropping schema log4stellar in ' + options.postgres.database + ' ...');
 		await runPsql(options, ['--command', 'DROP SCHEMA IF EXISTS log4stellar CASCADE;'], env);
 	}
 	log('Applying ' + options.dumpPath + ' to ' + options.postgres.database + ' ...');
-	await runPsql(options, ['--file', '/dev/stdin', '--single-transaction', '--set', 'ON_ERROR_STOP=1'], env, options.dumpPath);
+	const restoreArgs = ['--single-transaction', '--set', 'ON_ERROR_STOP=1'];
+	if (verified.manifest.accountStorage === 'postgres') {
+		// pg_dump recreates the public schema. RESTRICT refuses a nonempty target,
+		// and the schema replacement rolls back with the dump on any error.
+		restoreArgs.push('--command', 'DROP SCHEMA IF EXISTS public RESTRICT;');
+	}
+	await runPsql(options, [...restoreArgs, '--file', '/dev/stdin'], env, options.dumpPath);
 	log('PostgreSQL restore finished.');
 }
 
@@ -402,6 +416,7 @@ export async function restoreBackup(options) {
 			log('Restoring ' + verified.objects.count + ' objects into ' + options.s3.endpoint + '/' + options.s3.bucket + ' ...');
 			objectResult = await restoreObjectBytes(verified, {
 				s3: options.s3,
+				tenantStorage: options.tenantStorage,
 				backend: options.objectBackend,
 			});
 			log('Restored and read back ' + objectResult.restored + ' objects.');
@@ -509,12 +524,12 @@ async function main() {
 		throw new Error('A backup key file is required: pass --key-file=<path> or set LOG4STELLAR_BACKUP_KEY_FILE.');
 	}
 	process.umask(0o077);
-	const s3 = options.objectsConfig ? (JSON.parse(await readFile(options.objectsConfig, 'utf8'))).s3 : undefined;
+	const { s3, tenantStorage } = options.objectsConfig ? JSON.parse(await readFile(options.objectsConfig, 'utf8')) : {};
 	const result = await restoreBackup({
 		backupDir: options.backupDir,
 		keyMaterial: { keyFile: options.keyFile },
 		targetDir: options.targetDir,
-		s3,
+		s3, tenantStorage,
 		log: message => process.stderr.write(message + '\n'),
 	});
 	if (options.json) {

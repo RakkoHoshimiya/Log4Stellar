@@ -1,7 +1,12 @@
 {
+  "knowledge.title": "ナレッジ関連",
+  "knowledge.refresh": "ナレッジ関連を更新",
+  "knowledge.reindex": "ナレッジ索引を再構築",
   "workspace.tenants": "テナント管理",
   "workspace.displayName": "Log4Stellar ワークスペース",
   "workspace.preview": "文書をプレビュー",
   "workspace.previewVersion": "文書のバージョンをプレビュー",
-  "workspace.officeEditor": "Log4Stellar Office プレビュー"
+  "workspace.officeEditor": "Log4Stellar Office プレビュー",
+  "workspace.upload": "添付ファイルのアップロード",
+  "workspace.advancedSearch": "バージョン履歴と添付ファイルの検索"
 }

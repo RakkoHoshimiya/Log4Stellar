@@ -191,6 +191,61 @@ test('PV01: a ready preview is rendered without polling', async () => {
 	panel.dispose();
 	assert.equal(panel.receive, undefined);
 	assert.match(window.rendered[0].webview.html, /default-src 'none'/);
+	assert.match(panel.webview.html, /worker-src blob:; connect-src https:\/\/preview\.invalid\/[^;]*pdf\.worker\.min\.mjs;/);
+});
+
+test('the Office viewer fetches the bundled worker and reports a stalled first page', async () => {
+	const viewerSource = await readFile(new URL('./workspace-extension/office-viewer.mjs', import.meta.url), 'utf8');
+	const source = viewerSource.replace(/^import .*from '\.\/pdf\.min\.mjs';/m, '')
+		.replace('import.meta.url', "'https://preview.invalid/office-viewer.mjs'");
+	const status = { setAttribute() {}, dataset: { error: 'Could not render the preview.' } };
+	const message = { textContent: 'Preparing' };
+	const progress = { hidden: false };
+	const options = {};
+	const released = new Set();
+	const ready = Promise.withResolvers();
+	let onMessage;
+	let onDeadline;
+	let signal;
+	let destroyed = false;
+	class WorkerURL extends URL {
+		static createObjectURL(blob) {
+			assert.equal(blob.type, 'text/javascript');
+			return 'blob:worker-from-webview';
+		}
+		static revokeObjectURL(url) { released.add(url); }
+	}
+	vm.runInNewContext(source, {
+		URL: WorkerURL, Blob, AbortController, GlobalWorkerOptions: options,
+		acquireVsCodeApi: () => ({ postMessage: event => assert.equal(event.type, 'ready') }),
+		document: {
+			getElementById: id => ({ status, message })[id],
+			querySelector: () => progress,
+		},
+		addEventListener: (_type, listener) => { onMessage = listener; },
+		async fetch(url, request) {
+			assert.equal(url.href, 'https://preview.invalid/pdf.worker.min.mjs');
+			assert.equal(request.credentials, 'omit');
+			signal = request.signal;
+			return new Response('worker module');
+		},
+		getDocument() {
+			ready.resolve();
+			return { promise: new Promise(() => {}), async destroy() { destroyed = true; } };
+		},
+		setTimeout: callback => { onDeadline = callback; return 1; },
+		clearTimeout: () => {},
+	});
+	onMessage({ data: { type: 'document', bytes: new Uint8Array([1]) } });
+	await ready.promise;
+	assert.equal(options.workerSrc, 'blob:worker-from-webview');
+	assert.equal(progress.hidden, false);
+	onDeadline();
+	assert.equal(signal.aborted, true);
+	assert.equal(destroyed, true);
+	assert.equal(released.has(options.workerSrc), true);
+	assert.equal(progress.hidden, true);
+	assert.equal(message.textContent, status.dataset.error);
 });
 
 test('a queued preview is polled until ready and then rendered', async () => {

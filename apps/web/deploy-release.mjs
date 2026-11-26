@@ -96,7 +96,7 @@ function parseFlags(argv) {
 /**
  * Resolves every deployment path once so each later step works on absolutes.
  * All of it is overridable, which is what lets the drill run under `/tmp` without
- * touching `/home/log4stellar/.config/log4stellar`.
+ * touching `~/.config/log4stellar`.
  */
 export function deploymentConfig(flags = {}) {
 	const stateDir = resolve(flags['state-dir'] ?? process.env.LOG4STELLAR_DEPLOY_STATE ?? join(home, '.config', 'log4stellar'));
@@ -122,6 +122,7 @@ export function deploymentConfig(flags = {}) {
 		port,
 		workspace: flags.workspace ?? process.env.LOG4STELLAR_WORKSPACE_ID ?? 'log4stellar-main',
 		backend: flags.backend ?? process.env.LOG4STELLAR_STORAGE_BACKEND ?? 'rustfs',
+		managed: process.env.LOG4STELLAR_MANAGED_TENANTS === '1',
 		// With the local backend the launcher's positional argument is the notes
 		// directory, not a workspace ID; the workspace ID then comes from the
 		// environment. Default matches the production launcher's local branch.
@@ -219,6 +220,15 @@ export async function verifyCandidate(directory, config, options = {}) {
 		nodeMajor: marker.nodeMajor, files: marker.files.length, twoFactor: await supportsTwoFactor(root),
 	});
 	await assertRequiredFiles(root);
+	if (config.managed) {
+		for (const name of ['managed-auth.mjs', 'postgres-account-security.mjs']) {
+			try {
+				await lstat(join(root, 'server', name));
+			} catch {
+				throw new DeployError('ManagedRuntimeUnavailable', 'The release cannot open the managed PostgreSQL deployment.');
+			}
+		}
+	}
 	const inventory = await releaseInventory(root);
 	const expected = new Map(marker.files);
 	const differences = [];
@@ -396,6 +406,24 @@ export async function mfaCensus(authDir = join(home, '.cache', 'log4stellar-demo
 	}
 }
 
+async function deploymentMfaCensus(config) {
+	if (!config.managed) {
+		return mfaCensus(config.authDir);
+	}
+	const { postgres } = JSON.parse(await readFile(config.storageConfig, 'utf8'));
+	const { Pool } = await import('pg');
+	const pool = new Pool({ ...postgres, connectionTimeoutMillis: 5000, max: 1 });
+	try {
+		const { rows: [counts] } = await pool.query(`
+			SELECT (SELECT count(*)::int FROM public."twoFactor" WHERE verified) AS enrolled,
+				(SELECT count(*)::int FROM public."user" WHERE "twoFactorEnabled") AS enabled
+		`);
+		return { ...counts, available: true };
+	} finally {
+		await pool.end();
+	}
+}
+
 /**
  * The read-only half of preflight: TLS material, free space, PostgreSQL and RustFS
  * readability and the second-factor census. Nothing here writes anywhere.
@@ -426,7 +454,7 @@ export async function preflight(config, options = {}) {
 	}
 
 	progress('preflight: second-factor census', { authDir: config.authDir });
-	const mfa = await mfaCensus(config.authDir);
+	const mfa = await deploymentMfaCensus(config);
 	progress('preflight: second-factor census ok', { enrolled: mfa.enrolled, enabled: mfa.enabled, available: mfa.available });
 	return { tls, disk, database, objects, mfa };
 }
@@ -582,6 +610,7 @@ export async function serviceStatus(config) {
 function serviceEnvironment(config, release) {
 	const environment = { ...process.env };
 	environment.LOG4STELLAR_AUTH_DIR = config.authDir;
+	environment.LOG4STELLAR_MANAGED_TENANTS = config.managed ? '1' : '0';
 	environment.LOG4STELLAR_TLS_CERT = config.tlsCert;
 	environment.LOG4STELLAR_TLS_KEY = config.tlsKey;
 	environment.LOG4STELLAR_STORAGE_BACKEND = config.backend;
@@ -734,7 +763,7 @@ function fetchHttps(config, path, options = {}) {
 			headers: options.headers ?? {},
 			signal: AbortSignal.timeout(10_000),
 			ca: options.ca,
-			rejectUnauthorized: options.ca === undefined,
+			rejectUnauthorized: !config.allowUntrustedCert,
 		}, response => {
 			const chunks = [];
 			response.on('data', chunk => chunks.push(chunk));
@@ -895,6 +924,7 @@ async function dataBackup(config) {
 		env: {
 			...process.env,
 			LOG4STELLAR_AUTH_DIR: config.authDir,
+			LOG4STELLAR_MANAGED_TENANTS: config.managed ? '1' : '0',
 			LOG4STELLAR_STORAGE_CONFIG: config.storageConfig,
 			LOG4STELLAR_BACKUP_PG_DUMP: process.env.LOG4STELLAR_BACKUP_PG_DUMP ?? '1',
 		},
@@ -1100,7 +1130,7 @@ export async function rollbackRelease(config, options = {}) {
 		const candidate = await verifyCandidate(target, config);
 
 		progress('rollback policy: second-factor compatibility');
-		const mfa = await mfaCensus(config.authDir);
+		const mfa = await deploymentMfaCensus(config);
 		const targetSupportsMfa = candidate.twoFactor;
 		if ((mfa.enrolled > 0 || mfa.enabled > 0) && !targetSupportsMfa) {
 			// A refused rollback is an operational event too: the audit trail must show

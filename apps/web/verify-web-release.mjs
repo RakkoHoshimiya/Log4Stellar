@@ -157,7 +157,7 @@ async function smokeRelease(root) {
 				assert.equal((await get(path + entry, { method: 'HEAD' })).status, 200, name + ' browser bundle');
 			}
 		}
-		for (const asset of ['office-viewer.mjs', 'pdf.min.mjs', 'pdf.worker.min.mjs', 'PDFJS-LICENSE.txt']) {
+		for (const asset of ['office-viewer.mjs', 'pdf.min.mjs', 'pdf.worker.min.mjs', 'PDFJS-LICENSE.txt', 'package.nls.zh-cn.json', 'package.nls.zh-tw.json', 'package.nls.ja.json']) {
 			const url = '/static/extensions/' + webExtensionNames.length + '/' + asset;
 			assert.equal((await get(url, { method: 'HEAD' })).status, 200, 'Office preview ' + asset);
 		}

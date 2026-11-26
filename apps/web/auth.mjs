@@ -173,32 +173,8 @@ function adoptLegacyMembers(database, workspaceId) {
 	}
 }
 
-export async function openAuth({ workspaceId = resolveWorkspaceId({ environment: process.env }), adopt = true } = {}) {
-	const directory = process.env.LOG4STELLAR_AUTH_DIR;
-	const base = process.env.LOG4STELLAR_WEB_ORIGIN;
-	if (!directory || !base) {
-		throw new Error('Set LOG4STELLAR_AUTH_DIR and LOG4STELLAR_WEB_ORIGIN to run the Web service.');
-	}
-	if (!isValidWorkspaceId(workspaceId)) {
-		throw new Error('LOG4STELLAR_WORKSPACE_ID must be a lowercase storage workspace ID.');
-	}
-	const origin = new URL(base);
-	if (origin.protocol !== 'https:' || origin.origin !== base) {
-		throw new Error('LOG4STELLAR_WEB_ORIGIN must be a canonical HTTPS origin.');
-	}
-	const path = resolve(directory);
-	await mkdir(path, { recursive: true, mode: 0o700 });
-	const secret = (await readFile(join(path, 'secret'), 'utf8')).trim();
-	if (secret.length < 32) {
-		throw new Error('The authentication secret must be at least 32 characters long and randomly generated.');
-	}
-	const database = new DatabaseSync(join(path, 'auth.sqlite'));
-	database.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
-	const idleSeconds = clampIdleSeconds(Number(process.env.LOG4STELLAR_IDLE_SECONDS ?? 86_400));
-	if (!Number.isInteger(idleSeconds) || idleSeconds <= 0) {
-		throw new Error('LOG4STELLAR_IDLE_SECONDS must be a positive integer.');
-	}
-	const auth = betterAuth({
+export function createApplicationAuth({ database, origin, secret, idleSeconds }) {
+	return betterAuth({
 		appName: 'Log4Stellar',
 		baseURL: origin.origin,
 		secret,
@@ -249,6 +225,34 @@ export async function openAuth({ workspaceId = resolveWorkspaceId({ environment:
 			}),
 		],
 	});
+}
+
+export async function openAuth({ workspaceId = resolveWorkspaceId({ environment: process.env }), adopt = true } = {}) {
+	const directory = process.env.LOG4STELLAR_AUTH_DIR;
+	const base = process.env.LOG4STELLAR_WEB_ORIGIN;
+	if (!directory || !base) {
+		throw new Error('Set LOG4STELLAR_AUTH_DIR and LOG4STELLAR_WEB_ORIGIN to run the Web service.');
+	}
+	if (!isValidWorkspaceId(workspaceId)) {
+		throw new Error('LOG4STELLAR_WORKSPACE_ID must be a lowercase storage workspace ID.');
+	}
+	const origin = new URL(base);
+	if (origin.protocol !== 'https:' || origin.origin !== base) {
+		throw new Error('LOG4STELLAR_WEB_ORIGIN must be a canonical HTTPS origin.');
+	}
+	const path = resolve(directory);
+	await mkdir(path, { recursive: true, mode: 0o700 });
+	const secret = (await readFile(join(path, 'secret'), 'utf8')).trim();
+	if (secret.length < 32) {
+		throw new Error('The authentication secret must be at least 32 characters long and randomly generated.');
+	}
+	const database = new DatabaseSync(join(path, 'auth.sqlite'));
+	database.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
+	const idleSeconds = clampIdleSeconds(Number(process.env.LOG4STELLAR_IDLE_SECONDS ?? 86_400));
+	if (!Number.isInteger(idleSeconds) || idleSeconds <= 0) {
+		throw new Error('LOG4STELLAR_IDLE_SECONDS must be a positive integer.');
+	}
+	const auth = createApplicationAuth({ database, origin, secret, idleSeconds });
 	const migration = await getMigrations(auth.options);
 	await migration.runMigrations();
 	// Runs after the plugin migrator, which is what creates `user` (the replay

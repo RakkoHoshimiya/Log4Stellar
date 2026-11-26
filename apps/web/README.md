@@ -10,6 +10,7 @@
 |---|---|
 | 工作区、角色与 capability 判权 | [docs/workspace-access.md](docs/workspace-access.md) |
 | Web 租户管理、邀请与审计 | [docs/multi-tenant.md](docs/multi-tenant.md) |
+| 空库平台租户与工作区（隔离验收） | [docs/managed-workspaces.md](docs/managed-workspaces.md) |
 | 增量同步（快照、游标、冲突） | [docs/incremental-sync.md](docs/incremental-sync.md) |
 | 账户安全与双因素 | [docs/account-security.md](docs/account-security.md)、[运行时交付](docs/account-security-takeover.md)、[接线方案](docs/account-security-wiring.md) |
 | Git 仓库接入 | [docs/git-integration.md](docs/git-integration.md) |
@@ -173,7 +174,7 @@ sh worktree-link-artifacts.sh <worktree-name>   # codicon.ttf 与扩展产物（
 | `LOG4STELLAR_GIT_WORKSPACE_ROOTS` | 未设置 | 允许关联的仓库根目录列表；**不设则 `/git/v1/*` 恒为 `503 GitNotConfigured`** |
 | `LOG4STELLAR_GIT_TIMEOUT_MS` | `60000` | 单次 Git 操作超时，取值须在 1000–600000 之间，超出范围回到默认 |
 
-操作流程见[运维手册](docs/ops-runbook.md)。每个环境的实际参数由部署方通过服务配置注入。
+正式主机的具体取值属于运维信息，记录在运维记录的运行手册里，不要提交进仓库。
 
 ### 端口与 TLS
 
@@ -439,7 +440,7 @@ node apps/web/deploy-release.mjs status
 和切换前的检查项列成可勾选列表，避免文档与实现脱节。
 
 ```sh
-# 启动前将示例路径替换为本环境的配置
+# 启动（示例路径，按运维记录取值）
 export LOG4STELLAR_AUTH_DIR=/srv/log4stellar/auth
 export LOG4STELLAR_WEB_ORIGIN=https://notes.example.com
 export LOG4STELLAR_TLS_CERT=/srv/tls/server.crt
@@ -508,9 +509,9 @@ node --test --test-concurrency=1 apps/web/backup-drill.integration.test.mjs
 `421` 顶回来：
 
 ```sh
-curl --silent --insecure https://192.0.2.233:18990/healthz   # 存活，永远 200
-curl --silent --insecure https://192.0.2.233:18990/readyz    # 就绪 200，不就绪 503
-curl --silent --insecure https://192.0.2.233:18990/metrics   # Prometheus 文本格式
+curl --silent --cacert "$SERVER_CA_FILE" https://192.0.2.10:18990/healthz   # 存活，永远 200
+curl --silent --cacert "$SERVER_CA_FILE" https://192.0.2.10:18990/readyz    # 就绪 200，不就绪 503
+curl --silent --cacert "$SERVER_CA_FILE" https://192.0.2.10:18990/metrics   # Prometheus 文本格式
 ```
 
 `/healthz` 只看进程自身，PostgreSQL 或对象存储挂了它仍然是 `200` —— 跟随依赖的存活探针会去重启
@@ -556,3 +557,7 @@ export LOG4STELLAR_BACKUP_DIR=/path/to/backups
 | 品牌化/升级后工作台布局丢失 | 浏览器存储键随 `applicationName` 变化，笔记内容不受影响 |
 
 `pkill -f "serve-demo.mjs"` 会把发起命令的 shell 一起杀掉，按 PID 停进程。
+
+## 搜索历史版本和附件
+
+工作台命令「历史版本与附件搜索」可查历史版本、Office 与 PDF 正文。扫描 PDF 和旧版 Office 需配置可选的限时转换沙箱，详见[历史版本与附件正文搜索](docs/extended-search.md)。

@@ -10,7 +10,7 @@
 
 import { spawn } from 'node:child_process';
 import { rmSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat, writeFile, readFile } from 'node:fs/promises';
 import { realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -31,6 +31,7 @@ const pinnedConfig = Object.freeze([
 	// on the next fetch. The credential path appends its own `core.sshCommand`
 	// later, and a later `-c` wins.
 	['core.sshCommand', 'ssh'],
+	['http.sslVerify', 'true'],
 ]);
 
 const defaultTimeoutMs = 60_000;
@@ -489,6 +490,12 @@ export async function switchBranch(handle, name, { create = false, startPoint } 
 	if (handle.bare) {
 		throw gitError('BareRepository');
 	}
+	const status = await readStatus(handle);
+	if (!status.clean) {
+		const error = gitError('WorkTreeDirty');
+		error.conflicts = [...new Set(status.entries.map(entry => entry.path))];
+		throw error;
+	}
 	const args = create ? ['switch', '--create', name] : ['switch', name];
 	if (create && startPoint) {
 		args.push(startPoint);
@@ -536,7 +543,7 @@ function parseSwitchConflicts(stderr) {
 // Remote operations
 // ---------------------------------------------------------------------------
 
-const authFailureMessages = /authentication failed|could not read (username|password)|permission denied \(publickey\)|invalid username or password|401 unauthorized|403 forbidden|access denied|terminal prompts disabled/i;
+const authFailureMessages = /authentication failed|could not read (username|password)|host key verification failed|remote host identification has changed|permission denied \(publickey\)|invalid username or password|401 unauthorized|403 forbidden|access denied|terminal prompts disabled/i;
 const unreachableMessages = /does not appear to be a git repository|could not read from remote repository|repository .* not found|does not exist|connection refused|connection timed out|connection reset|couldn't connect|could not connect|failed to connect|unable to access|remote end hung up|early eof|network is unreachable|could not resolve host|no route to host|transport '[a-z]+' not allowed|not allowed by the protocol allowlist/i;
 
 /** Maps a failed remote command to the documented error code (§4.2). */
@@ -566,28 +573,35 @@ export function classifyRemoteFailure(result, { remoteUrl, localPath } = {}) {
  * config: an HTTPS token arrives through a throw-away askpass script (the secret is
  * in the environment, not the argv), an SSH key through a 0600 temp file.
  */
-export async function withRemoteCredential(credential, work) {
+export async function withRemoteCredential(credential, work, { knownHosts, tlsCaFile, httpsUsername } = {}) {
 	const directory = await privateWorkDirectory();
 	const scratch = await mkdtemp(join(directory, 'cred-'));
 	const cleanup = () => rm(scratch, { recursive: true, force: true }).catch(() => {});
 	try {
+		const config = tlsCaFile ? [['http.sslCAInfo', tlsCaFile]] : [];
 		if (!credential) {
-			return await work({ config: [], env: {}, allowFile: false });
+			return await work({ config, env: {}, allowFile: false });
 		}
 		if (credential.kind === 'https-token') {
 			const askpass = join(scratch, 'askpass.sh');
-			await writeFile(askpass, '#!/bin/sh\nexec printf \'%s\\n\' "$L4S_GIT_TOKEN"\n', { mode: 0o700 });
+			await writeFile(askpass, '#!/bin/sh\ncase "$1" in *Username*) value="$L4S_GIT_USERNAME" ;; *) value="$L4S_GIT_TOKEN" ;; esac\nprintf \'%s\\n\' "$value"\n', { mode: 0o700 });
 			return await work({
-				config: [['credential.helper', '']],
-				env: { GIT_ASKPASS: askpass, L4S_GIT_TOKEN: credential.secret, GIT_CONFIG_COUNT: '0' },
+				config: [...config, ['credential.helper', '']],
+				env: { GIT_ASKPASS: askpass, L4S_GIT_USERNAME: httpsUsername || 'x-access-token', L4S_GIT_TOKEN: credential.secret, GIT_CONFIG_COUNT: '0' },
 			});
 		}
 		if (credential.kind === 'ssh-key') {
 			const keyPath = join(scratch, 'id_key');
 			await writeFile(keyPath, normalizePrivateKey(credential.secret), { mode: 0o600 });
-			const sshCommand = ['ssh', '-i', keyPath, '-o', 'IdentitiesOnly=yes', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'UserKnownHostsFile=' + join(scratch, 'known_hosts')].join(' ');
+			const pins = join(scratch, 'known_hosts');
+			if (knownHosts) {
+				const contents = await readFile(knownHosts).catch(() => { throw gitError('RemoteAuthenticationFailed'); });
+				await writeFile(pins, contents, { mode: 0o600 });
+			}
+			const sshCommand = ['ssh', '-i', keyPath, '-o', 'IdentitiesOnly=yes', '-o', 'BatchMode=yes',
+				'-o', 'StrictHostKeyChecking=' + (knownHosts ? 'yes' : 'accept-new'), '-o', 'UserKnownHostsFile=' + pins].join(' ');
 			// Later `-c` wins over the earlier one, so this replaces the pinned `ssh`.
-			return await work({ config: [['core.sshCommand', sshCommand]], env: {} });
+			return await work({ config: [...config, ['core.sshCommand', sshCommand]], env: {} });
 		}
 		throw gitError('InvalidCredential');
 	} finally {
@@ -603,17 +617,20 @@ function normalizePrivateKey(secret) {
 export const remoteRefspec = '+refs/heads/*:refs/remotes/origin/*';
 export const remoteLabel = 'origin';
 
-export async function fetchRemote(handle, { url, credential, timeoutMs = defaultTimeoutMs, allowFile = false }) {
+export async function fetchRemote(handle, { url, credential, timeoutMs = defaultTimeoutMs, allowFile = false, knownHosts, tlsCaFile, httpsUsername }) {
 	return runRemote(handle, {
 		url,
 		credential,
+		knownHosts,
+		tlsCaFile,
+		httpsUsername,
 		allowFile,
 		timeoutMs,
 		args: ['fetch', '--prune', '--no-tags', url, remoteRefspec],
 	});
 }
 
-async function runRemote(handle, { url, credential, args, timeoutMs, allowFile }) {
+async function runRemote(handle, { url, credential, args, timeoutMs, allowFile, knownHosts, tlsCaFile, httpsUsername }) {
 	return withRemoteCredential(credential, async extra => {
 		const env = { ...extra.env, GIT_ALLOW_PROTOCOL: gitAllowedProtocols({ allowFile }) };
 		const result = await runGit(args, { cwd: handle.path, env, config: extra.config, timeoutMs });
@@ -621,10 +638,10 @@ async function runRemote(handle, { url, credential, args, timeoutMs, allowFile }
 			throw classifyRemoteFailure(result, { remoteUrl: url, localPath: handle.path });
 		}
 		return result;
-	});
+	}, { knownHosts, tlsCaFile, httpsUsername });
 }
 
-export async function readRemoteHead(handle, { url, branch, credential, timeoutMs, allowFile }) {
+export async function readRemoteHead(handle, { url, branch, credential, timeoutMs, allowFile, knownHosts, tlsCaFile, httpsUsername }) {
 	return withRemoteCredential(credential, async extra => {
 		const result = await runGit(['ls-remote', '--heads', url, 'refs/heads/' + branch], {
 			cwd: handle.path,
@@ -640,7 +657,7 @@ export async function readRemoteHead(handle, { url, branch, credential, timeoutM
 			return undefined;
 		}
 		return line.split('\t')[0].trim();
-	});
+	}, { knownHosts, tlsCaFile, httpsUsername });
 }
 
 /**
@@ -650,8 +667,8 @@ export async function readRemoteHead(handle, { url, branch, credential, timeoutM
  * yet"), so a concurrent update is a `412 RemoteChanged` the user can diagnose
  * instead of an opaque race. Omitting it skips the check entirely.
  */
-export async function pushBranch(handle, { url, branch, commit = 'HEAD', expectedRemote, credential, timeoutMs = defaultTimeoutMs, allowFile = false }) {
-	const currentRemote = await readRemoteHead(handle, { url, branch, credential, timeoutMs, allowFile });
+export async function pushBranch(handle, { url, branch, commit = 'HEAD', expectedRemote, credential, timeoutMs = defaultTimeoutMs, allowFile = false, knownHosts, tlsCaFile, httpsUsername }) {
+	const currentRemote = await readRemoteHead(handle, { url, branch, credential, timeoutMs, allowFile, knownHosts, tlsCaFile, httpsUsername });
 	if (expectedRemote !== undefined) {
 		const matches = expectedRemote === null ? currentRemote === undefined : currentRemote === expectedRemote;
 		if (!matches) {
@@ -669,7 +686,7 @@ export async function pushBranch(handle, { url, branch, commit = 'HEAD', expecte
 			return { remote: currentRemote, outcome: 'pushed' };
 		}
 		return { ...mapPushFailure(result, { url, path: handle.path }), remote: currentRemote };
-	});
+	}, { knownHosts, tlsCaFile, httpsUsername });
 }
 
 function mapPushFailure(result, context) {

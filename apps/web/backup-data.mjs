@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { holdTenantStorageReadLock, publicTenantStorageProfiles, selectTenantStorage, tenantStorageProfiles } from './tenant-storage.mjs';
 // Produce one restorable backup: the account database, the account and Git secrets,
 // the PostgreSQL metadata dump, every immutable object the snapshot references, and
 // the deployment configuration needed to start the service on a bare host.
@@ -131,7 +132,7 @@ function inspectAuthSnapshot(snapshotPath) {
  * @param {string} destination
  * @param {string} snapshot
  */
-async function backupPostgres(postgres, destination, snapshot) {
+async function backupPostgres(postgres, destination, snapshot, managed) {
 	if (postgres.ssl && typeof postgres.ssl === 'object' && Object.keys(postgres.ssl).length > 0) {
 		throw new Error('Use a pg_dump service configuration for custom PostgreSQL TLS settings.');
 	}
@@ -145,6 +146,7 @@ async function backupPostgres(postgres, destination, snapshot) {
 		'--username', String(postgres.user),
 		'--dbname', String(postgres.database),
 		'--schema', 'log4stellar',
+		...(managed ? ['--schema', 'public'] : []),
 		'--no-owner', '--no-privileges',
 		'--format', 'plain',
 		'--snapshot', snapshot,
@@ -161,7 +163,7 @@ async function backupPostgres(postgres, destination, snapshot) {
  * a container: the Debian build inside `postgres:18` links against that image's glibc
  * and aborts with a stack smashing error on the host. So when the binary is missing,
  * run the dump inside a throwaway container on the host network and stream the SQL
- * back out; `--network host` is also what reaches a database on 192.0.2.9, which a
+ * back out; `--network host` is also what reaches a database on a separate host, which a
  * bridged container would not.
  * @param {string[]} args
  * @param {string} destination
@@ -208,7 +210,7 @@ async function runDump(args, destination, env) {
  * @param {object} postgres
  * @param {string} stage  staging directory for the dump
  */
-async function backupStorageMetadata(postgres, stage) {
+async function backupStorageMetadata(postgres, stage, managed) {
 	const { Pool } = createRequire(import.meta.url)('pg');
 	const pool = new Pool({ ...postgres, max: 2 });
 	const connection = await pool.connect().catch(async error => {
@@ -217,12 +219,17 @@ async function backupStorageMetadata(postgres, stage) {
 	});
 	try {
 		await connection.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
-		const inventory = (await connection.query(`
-			SELECT workspace_id AS "workspaceId", sha256, size_bytes AS "size"
-			FROM log4stellar.storage_file_versions
-			GROUP BY workspace_id, sha256, size_bytes
-			ORDER BY workspace_id, sha256
-		`)).rows.map(row => ({ workspaceId: row.workspaceId, sha256: row.sha256, size: Number(row.size) }));
+		const inventory = (await connection.query(managed ? `
+			SELECT DISTINCT v.workspace_id AS "workspaceId", w.tenant_id AS "tenantId", v.sha256, v.size_bytes AS "size"
+			FROM log4stellar.storage_file_versions v LEFT JOIN log4stellar.managed_workspaces w ON w.id=v.workspace_id
+			ORDER BY "workspaceId", v.sha256
+		` : `
+			SELECT DISTINCT workspace_id AS "workspaceId", sha256, size_bytes AS "size"
+			FROM log4stellar.storage_file_versions ORDER BY "workspaceId", sha256
+		`)).rows.map(row => ({ ...row, size: Number(row.size) }));
+		if (managed && inventory.some(row => !row.tenantId)) {
+			throw new Error('The managed backup includes objects without a tenant.');
+		}
 		const counts = (await connection.query(`
 			SELECT
 				(SELECT count(*) FROM log4stellar.storage_entries)::int AS entries,
@@ -232,7 +239,7 @@ async function backupStorageMetadata(postgres, stage) {
 		`)).rows[0];
 		const { rows: [{ snapshot }] } = await connection.query('SELECT pg_export_snapshot() AS snapshot');
 		const dumpPath = path.join(stage, 'log4stellar.sql');
-		await backupPostgres(postgres, dumpPath, snapshot);
+		await backupPostgres(postgres, dumpPath, snapshot, managed);
 		return { inventory, counts, dumpPath, snapshot };
 	} finally {
 		try {
@@ -265,7 +272,7 @@ async function sealObject(s3, object, context) {
 	}
 	let blobs = context.blobsByWorkspace.get(object.workspaceId);
 	if (!blobs) {
-		blobs = await openRustfsBlobs(s3, object.workspaceId, path.join(context.stage, '.blob-spool'));
+		blobs = await openRustfsBlobs(s3, object.workspaceId, path.join(context.stage, '.blob-spool'), { tenantId: object.tenantId });
 		context.blobsByWorkspace.set(object.workspaceId, blobs);
 	}
 	const plaintext = path.join(context.stage, 'object.bin');
@@ -285,6 +292,7 @@ async function sealObject(s3, object, context) {
 		const { size: storedSize } = await context.sealer.encryptFile(plaintext, destination);
 		return {
 			workspaceId: object.workspaceId,
+			...(object.tenantId && { tenantId: object.tenantId }),
 			sha256: object.sha256,
 			size: object.size,
 			storedSize,
@@ -294,7 +302,7 @@ async function sealObject(s3, object, context) {
 				table: 'log4stellar.storage_file_versions',
 				columns: ['workspace_id', 'sha256', 'size_bytes'],
 				bucket: s3.bucket ?? null,
-				key: 'workspaces/' + object.workspaceId + '/sha256/' + object.sha256,
+				key: (object.tenantId ? 'tenants/' + object.tenantId + '/' : '') + 'workspaces/' + object.workspaceId + '/sha256/' + object.sha256,
 			},
 		};
 	} finally {
@@ -312,8 +320,11 @@ async function sealObject(s3, object, context) {
  */
 async function createBackup(stage, options) {
 	const startedAt = Date.now();
+	const accountStorage = options.accountStorage;
+	const managed = accountStorage === 'postgres';
 	const plan = planBackupScope({
 		scope: options.scope,
+		accountStorage,
 		exportObjects: options.scope === scopeFull,
 		authDir: options.authDir,
 		configDir: options.configDir,
@@ -330,6 +341,7 @@ async function createBackup(stage, options) {
 		}
 	}
 
+	const profiles = managed ? tenantStorageProfiles(settings) : {};
 	/** @type {Record<string, any>} */
 	const manifest = {
 		format: 2,
@@ -337,6 +349,7 @@ async function createBackup(stage, options) {
 		tool: { name: 'log4stellar-backup', version: 2, node: process.version },
 		backupId: path.basename(stage),
 		scope: plan.scope,
+		...(managed && { accountStorage }),
 		host: hostname(),
 		createdAt: new Date(startedAt).toISOString(),
 		completedAt: null,
@@ -346,6 +359,7 @@ async function createBackup(stage, options) {
 		// deployment member, which is exactly what the encryption is for.
 		origin: {
 			s3: { endpoint: settings.s3.endpoint ?? null, region: settings.s3.region ?? null, bucket: settings.s3.bucket ?? null },
+			...(Object.keys(profiles).length > 0 && { tenantStorage: publicTenantStorageProfiles(profiles) }),
 			postgres: {
 				host: settings.postgres.host ?? null,
 				port: settings.postgres.port ?? null,
@@ -362,21 +376,23 @@ async function createBackup(stage, options) {
 	const membersByName = new Map(plan.members.map(member => [member.name, member]));
 
 	// 1. The account database, restored from a consistent SQLite snapshot.
-	const authSnapshot = path.join(stage, 'auth.sqlite');
-	await backupSqlite(path.join(options.authDir, 'auth.sqlite'), authSnapshot);
-	const authInspection = inspectAuthSnapshot(authSnapshot);
-	if (authInspection.note) {
-		manifest.notes.push(authInspection.note);
+	if (!managed) {
+		const authSnapshot = path.join(stage, 'auth.sqlite');
+		await backupSqlite(path.join(options.authDir, 'auth.sqlite'), authSnapshot);
+		const authInspection = inspectAuthSnapshot(authSnapshot);
+		if (authInspection.note) {
+			manifest.notes.push(authInspection.note);
+		}
+		manifest.counts.memberships = authInspection.memberships;
+		manifest.counts.workspaces = authInspection.workspaces.length;
+		manifest.auth = {
+			tables: authInspection.tables,
+			memberColumns: authInspection.memberColumns,
+			workspaceIds: authInspection.workspaces,
+		};
+		await sealMember(stage, manifest, membersByName.get('auth.sqlite'), { sealer, plaintextPath: authSnapshot });
+		await rm(authSnapshot, { force: true });
 	}
-	manifest.counts.memberships = authInspection.memberships;
-	manifest.counts.workspaces = authInspection.workspaces.length;
-	manifest.auth = {
-		tables: authInspection.tables,
-		memberColumns: authInspection.memberColumns,
-		workspaceIds: authInspection.workspaces,
-	};
-	await sealMember(stage, manifest, membersByName.get('auth.sqlite'), { sealer, plaintextPath: authSnapshot });
-	await rm(authSnapshot, { force: true });
 
 	// 2. The signing secret: losing it invalidates every session and every sealed
 	//    account security secret.
@@ -392,7 +408,7 @@ async function createBackup(stage, options) {
 	});
 
 	// 4. The PostgreSQL metadata dump and the object inventory, at one snapshot.
-	const metadata = await backupStorageMetadata(settings.postgres, stage);
+	const metadata = await backupStorageMetadata(settings.postgres, stage, managed);
 	await sealMember(stage, manifest, membersByName.get('log4stellar.sql'), { sealer, plaintextPath: metadata.dumpPath });
 	await rm(metadata.dumpPath, { force: true });
 	manifest.counts.entries = metadata.counts.entries;
@@ -409,7 +425,7 @@ async function createBackup(stage, options) {
 			const context = { sealer, backupDir: stage, stage, blobsByWorkspace };
 			const entries = [];
 			for (const object of inventory) {
-				entries.push(await sealObject(settings.s3, object, context));
+				entries.push(await sealObject(selectTenantStorage(settings.s3, profiles, object.tenantId), object, context));
 			}
 			manifest.objects = {
 				directory: 'objects',
@@ -431,10 +447,12 @@ async function createBackup(stage, options) {
 	const indexBytes = Buffer.from(JSON.stringify({
 		schema: 1,
 		scope: plan.scope,
+		...(managed && { accountStorage }),
 		count: manifest.objects.count,
 		bytes: manifest.objects.bytes,
 		entries: manifest.objects.entries.map(entry => ({
 			workspaceId: entry.workspaceId,
+			...(entry.tenantId && { tenantId: entry.tenantId }),
 			sha256: entry.sha256,
 			size: entry.size,
 			storedSha256: entry.storedSha256,
@@ -617,9 +635,15 @@ async function main() {
 	await mkdir(parent, { recursive: true, mode: 0o700 });
 	const stage = await mkdtemp(path.join(parent, '.log4stellar-backup-'));
 	let manifest = null;
+	const managed = process.env.LOG4STELLAR_MANAGED_TENANTS === '1';
+	const { Pool } = createRequire(import.meta.url)('pg');
+	const maintenancePool = managed ? new Pool({ ...settings.postgres, max: 1 }) : undefined;
+	let catalogLease;
 	try {
+		if (maintenancePool) catalogLease = await holdTenantStorageReadLock(maintenancePool);
 		manifest = await createBackup(stage, {
 			scope: options.scope,
+			accountStorage: managed ? 'postgres' : undefined,
 			keyMaterial,
 			authDir,
 			configDir,
@@ -711,6 +735,9 @@ async function main() {
 			}
 		}
 		throw error;
+	} finally {
+		catalogLease?.release(true);
+		await maintenancePool?.end();
 	}
 }
 

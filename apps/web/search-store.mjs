@@ -316,7 +316,7 @@ export async function queryDocuments(connection, { workspaceId, needle, after, l
 	params.push(limit + 1);
 	const { rows } = await connection.query(
 		`WITH scored AS (
-			SELECT d.file_id, d.revision_id, e.path, d.indexed_ms, d.body,
+			SELECT d.file_id, d.revision_id, e.path, d.indexed_ms, (d.body || '') AS body,
 				strpos(lower(e.path), $2) AS path_pos,
 				strpos(lower(d.title), $2) AS title_pos,
 				strpos(lower(d.body), $2) AS body_pos
@@ -383,10 +383,7 @@ export async function countDocuments(connection, { workspaceId, needle, maximum 
  * The generation moves forward first: a cursor issued under the previous generation
  * is refused afterwards instead of addressing rows the rebuild moved or removed.
  */
-export async function prepareRebuild(connection, workspaceId, files, nowMs = Date.now()) {
-	const generation = await bumpIndexGeneration(connection, workspaceId, nowMs);
-	await deleteWorkspaceDocuments(connection, workspaceId);
-	await connection.query(`DELETE FROM ${searchTables.jobs} WHERE workspace_id = $1`, [workspaceId]);
+export async function enqueueSearchBaseline(connection, workspaceId, files, nowMs = Date.now()) {
 	if (files.length > 0) {
 		await connection.query(
 			`INSERT INTO ${searchTables.jobs}
@@ -396,5 +393,12 @@ export async function prepareRebuild(connection, workspaceId, files, nowMs = Dat
 			[workspaceId, rebuildSeq, nowMs, files.map(file => file.fileId), files.map(file => file.revisionId)],
 		);
 	}
+}
+
+export async function prepareRebuild(connection, workspaceId, files, nowMs = Date.now()) {
+	const generation = await bumpIndexGeneration(connection, workspaceId, nowMs);
+	await deleteWorkspaceDocuments(connection, workspaceId);
+	await connection.query(`DELETE FROM ${searchTables.jobs} WHERE workspace_id = $1`, [workspaceId]);
+	await enqueueSearchBaseline(connection, workspaceId, files, nowMs);
 	return generation;
 }

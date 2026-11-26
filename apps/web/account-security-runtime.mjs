@@ -148,7 +148,7 @@ export function createChallengeResolver({ auth, database }) {
 		}
 		let row;
 		try {
-			row = database.prepare('SELECT identifier, value, expiresAt FROM verification WHERE identifier = ?').get(identifier);
+			row = await database.prepare('SELECT identifier, value, expiresAt FROM verification WHERE identifier = ?').get(identifier);
 		} catch {
 			return undefined;
 		}
@@ -174,13 +174,13 @@ async function resolveSecret(auth) {
 
 // --- small database helpers ----------------------------------------------
 
-function userRow(database, userId) {
-	const row = database.prepare('SELECT id, username, name, email, twoFactorEnabled FROM user WHERE id = ?').get(userId);
+function* userRow(database, userId) {
+	const row = yield database.prepare('SELECT id, username, name, email, twoFactorEnabled FROM user WHERE id = ?').get(userId);
 	return row ? Object.freeze({ id: String(row.id), username: row.username ?? null, name: row.name ?? null, email: row.email ?? null, twoFactorEnabled: Number(row.twoFactorEnabled ?? 0) }) : undefined;
 }
 
-function twoFactorRow(database, userId) {
-	const row = database.prepare('SELECT id, secret, backupCodes, verified, failedVerificationCount, lockedUntil FROM twoFactor WHERE userId = ?').get(userId);
+function* twoFactorRow(database, userId) {
+	const row = yield database.prepare('SELECT id, secret, backupCodes, verified, failedVerificationCount, lockedUntil FROM twoFactor WHERE userId = ?').get(userId);
 	return row ? Object.freeze({
 		id: String(row.id),
 		secret: String(row.secret),
@@ -191,10 +191,10 @@ function twoFactorRow(database, userId) {
 	}) : undefined;
 }
 
-function sessionRows(database, userId, { excludeToken } = {}) {
+function* sessionRows(database, userId, { excludeToken } = {}) {
 	const rows = excludeToken === undefined
-		? database.prepare('SELECT id, token, expiresAt, createdAt, updatedAt, ipAddress, userAgent FROM session WHERE userId = ? ORDER BY updatedAt DESC LIMIT ' + openSessionsLimit).all(userId)
-		: database.prepare('SELECT id, token, expiresAt, createdAt, updatedAt, ipAddress, userAgent FROM session WHERE userId = ? AND token <> ? ORDER BY updatedAt DESC LIMIT ' + openSessionsLimit).all(userId, excludeToken);
+		? yield database.prepare('SELECT id, token, expiresAt, createdAt, updatedAt, ipAddress, userAgent FROM session WHERE userId = ? ORDER BY updatedAt DESC LIMIT ' + openSessionsLimit).all(userId)
+		: yield database.prepare('SELECT id, token, expiresAt, createdAt, updatedAt, ipAddress, userAgent FROM session WHERE userId = ? AND token <> ? ORDER BY updatedAt DESC LIMIT ' + openSessionsLimit).all(userId, excludeToken);
 	return rows.map(row => ({
 		id: String(row.id),
 		token: String(row.token),
@@ -206,31 +206,55 @@ function sessionRows(database, userId, { excludeToken } = {}) {
 	}));
 }
 
-function insertSession(database, { userId, token, secret, idleSeconds, ipAddress, userAgent, nowMs }) {
+function* insertSession(database, { userId, token, secret, idleSeconds, ipAddress, userAgent, nowMs }) {
 	const expiry = sessionExpiryAfterSecondFactor({ completedAtMs: nowMs, idleSeconds });
 	const now = new Date(nowMs).toISOString();
-	database.prepare(
+	const id = generateRandomString(32);
+	yield database.prepare(
 		'INSERT INTO session (id, expiresAt, token, createdAt, updatedAt, ipAddress, userAgent, userId, impersonatedBy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)',
-	).run(generateRandomString(32), new Date(expiry.expiresAtMs).toISOString(), token, now, now, ipAddress, userAgent, userId);
-	return { token, expiresAtMs: expiry.expiresAtMs };
+	).run(id, new Date(expiry.expiresAtMs).toISOString(), token, now, now, ipAddress, userAgent, userId);
+	return { id, token, expiresAtMs: expiry.expiresAtMs };
 }
 
-function touchSession(database, token, nowMs) {
-	return database.prepare('UPDATE session SET updatedAt = ? WHERE token = ?').run(new Date(nowMs).toISOString(), token).changes > 0;
+function* markSessionFactor(database, id) {
+	if (database.hasSecondFactor) {
+		yield database.prepare('INSERT INTO account_session_factor (session_id) VALUES (?) ON CONFLICT DO NOTHING').run(id);
+	}
 }
 
-function deleteSession(database, token) {
-	return database.prepare('DELETE FROM session WHERE token = ?').run(token).changes > 0;
+function* touchSession(database, token, nowMs) {
+	return (yield database.prepare('UPDATE session SET updatedAt = ? WHERE token = ?').run(new Date(nowMs).toISOString(), token)).changes > 0;
 }
 
-function deleteOtherSessions(database, userId, keepToken) {
-	return database.prepare('DELETE FROM session WHERE userId = ? AND token <> ?').run(userId, keepToken).changes;
+function* deleteSession(database, token) {
+	return (yield database.prepare('DELETE FROM session WHERE token = ?').run(token)).changes > 0;
 }
 
-function writeTransaction(database, update) {
+function* deleteOtherSessions(database, userId, keepToken) {
+	return (yield database.prepare('DELETE FROM session WHERE userId = ? AND token <> ?').run(userId, keepToken)).changes;
+}
+
+function runSteps(steps, current = steps.next()) {
+	while (!current.done) {
+		const operation = current.value;
+		if (operation && typeof operation.then === 'function') {
+			return operation.then(
+				value => runSteps(steps, steps.next(value)),
+				error => runSteps(steps, steps.throw(error)),
+			);
+		}
+		current = steps.next(operation);
+	}
+	return current.value;
+}
+
+function writeTransaction(database, userId, update) {
+	if (database.transaction) {
+		return database.transaction(userId, () => runSteps(update()));
+	}
 	database.exec('BEGIN IMMEDIATE');
 	try {
-		const result = update();
+		const result = runSteps(update());
 		database.exec('COMMIT');
 		return result;
 	} catch (error) {
@@ -239,8 +263,8 @@ function writeTransaction(database, update) {
 	}
 }
 
-function claimTotpStep(database, userId, step, nowMs) {
-	const claimed = database.prepare(
+function* claimTotpStep(database, userId, step, nowMs) {
+	const claimed = yield database.prepare(
 		`INSERT INTO account_totp_replay (user_id, last_used_step, updated_at) VALUES (?, ?, ?)
 		ON CONFLICT (user_id) DO UPDATE SET last_used_step = excluded.last_used_step, updated_at = excluded.updated_at
 		WHERE account_totp_replay.last_used_step < excluded.last_used_step`,
@@ -256,8 +280,8 @@ function challengeIdentifierFor(state) {
 	return state.challenge?.identifier;
 }
 
-function attemptRow(database, identifier) {
-	const row = database.prepare('SELECT identifier, value, expiresAt FROM verification WHERE identifier = ?').get('2fa-attempts-' + identifier);
+function* attemptRow(database, identifier) {
+	const row = yield database.prepare('SELECT identifier, value, expiresAt FROM verification WHERE identifier = ?').get('2fa-attempts-' + identifier);
 	return row ? { identifier: String(row.identifier), value: String(row.value), expiresAt: String(row.expiresAt) } : undefined;
 }
 
@@ -269,17 +293,17 @@ function consumeAttempt(database, state) {
 	if (identifier === undefined) {
 		return false;
 	}
-	return writeTransaction(database, () => {
-		const row = attemptRow(database, identifier);
+	return writeTransaction(database, state.challenge.userId, function* () {
+		const row = yield* attemptRow(database, identifier);
 		if (!row) {
 			return false;
 		}
 		const attempts = Number(row.value);
 		if (!Number.isSafeInteger(attempts) || attempts >= challengePolicy.maxAttempts) {
-			database.prepare('DELETE FROM verification WHERE identifier IN (?, ?)').run(identifier, row.identifier);
+			yield database.prepare('DELETE FROM verification WHERE identifier IN (?, ?)').run(identifier, row.identifier);
 			return false;
 		}
-		database.prepare('UPDATE verification SET value = ? WHERE identifier = ?').run(String(attempts + 1), row.identifier);
+		yield database.prepare('UPDATE verification SET value = ? WHERE identifier = ?').run(String(attempts + 1), row.identifier);
 		return true;
 	});
 }
@@ -478,17 +502,17 @@ export function createAccountSecurityRuntime({ auth, database, secret: providedS
 		return secret;
 	}
 
-	function currentSessionRow(token) {
-		const row = database.prepare('SELECT id, token, userId, expiresAt FROM session WHERE token = ?').get(token);
+	function* currentSessionRow(token) {
+		const row = yield database.prepare('SELECT id, token, userId, expiresAt FROM session WHERE token = ?').get(token);
 		return row ? { id: String(row.id), token: String(row.token), userId: String(row.userId), expiresAt: String(row.expiresAt) } : undefined;
 	}
 
-	function requireCurrentSession(state) {
+	function* requireCurrentSession(state) {
 		const token = state?.session?.session?.token;
 		if (typeof token !== 'string') {
 			throw new WorkspaceError(401, accountSecurityErrorCodes.twoFactorChallengeRequired);
 		}
-		const row = currentSessionRow(token);
+		const row = yield* currentSessionRow(token);
 		if (!row) {
 			throw new WorkspaceError(401, accountSecurityErrorCodes.sessionExpired);
 		}
@@ -502,7 +526,7 @@ export function createAccountSecurityRuntime({ auth, database, secret: providedS
 			throw new WorkspaceError(401, accountSecurityErrorCodes.reauthenticationRequired);
 		}
 		const context = await auth.$context;
-		const account = database.prepare("SELECT id, password FROM account WHERE userId = ? AND providerId = 'credential'").get(userId);
+		const account = await database.prepare("SELECT id, password FROM account WHERE userId = ? AND providerId = 'credential'").get(userId);
 		if (!account || typeof account.password !== 'string') {
 			throw new WorkspaceError(401, accountSecurityErrorCodes.reauthenticationRequired);
 		}
@@ -539,7 +563,7 @@ export function createAccountSecurityRuntime({ auth, database, secret: providedS
 		if (step === -1) {
 			return { ok: false, reason: 'invalid' };
 		}
-		const replay = database.prepare('SELECT last_used_step FROM account_totp_replay WHERE user_id = ?').get(userId);
+		const replay = await database.prepare('SELECT last_used_step FROM account_totp_replay WHERE user_id = ?').get(userId);
 		try {
 			admitTotpStep({
 				lastUsedStep: replay ? Number(replay.last_used_step) : undefined,
@@ -562,20 +586,21 @@ export function createAccountSecurityRuntime({ auth, database, secret: providedS
 		const { identifier, userId } = state.challenge;
 		const { ipAddress, userAgent } = metadataOf(ctx);
 		const token = generateRandomString(32);
-		return writeTransaction(database, () => {
-			const current = twoFactorRow(database, userId);
+		return writeTransaction(database, userId, function* () {
+			const current = yield* twoFactorRow(database, userId);
 			if (!current?.verified || current.id !== row.id || current.secret !== row.secret) {
 				throw new WorkspaceError(409, accountSecurityErrorCodes.totpNotEnrolled);
 			}
 			assertUnlocked(current, nowMs);
-			const consumed = database.prepare('DELETE FROM verification WHERE identifier = ? AND value = ?').run(identifier, userId);
+			const consumed = yield database.prepare('DELETE FROM verification WHERE identifier = ? AND value = ?').run(identifier, userId);
 			if (Number(consumed.changes) !== 1) {
 				throw new WorkspaceError(401, accountSecurityErrorCodes.twoFactorChallengeRequired);
 			}
-			consumeFactor();
-			database.prepare('DELETE FROM verification WHERE identifier = ?').run('2fa-attempts-' + identifier);
-			database.prepare('UPDATE twoFactor SET failedVerificationCount = 0, lockedUntil = NULL WHERE id = ?').run(row.id);
-			insertSession(database, { userId, token, idleSeconds: idle, ipAddress, userAgent, nowMs });
+			yield* consumeFactor();
+			yield database.prepare('DELETE FROM verification WHERE identifier = ?').run('2fa-attempts-' + identifier);
+			yield database.prepare('UPDATE twoFactor SET failedVerificationCount = 0, lockedUntil = NULL WHERE id = ?').run(row.id);
+			const issued = yield* insertSession(database, { userId, token, idleSeconds: idle, ipAddress, userAgent, nowMs });
+			yield* markSessionFactor(database, issued.id);
 			return token;
 		});
 	}
@@ -586,12 +611,12 @@ export function createAccountSecurityRuntime({ auth, database, secret: providedS
 		}
 	}
 
-	function requireChallengeAttempt(state, row, nowMs) {
+	async function requireChallengeAttempt(state, row, nowMs) {
 		if (!row?.verified) {
 			throw new WorkspaceError(409, accountSecurityErrorCodes.totpNotEnrolled);
 		}
 		assertUnlocked(row, nowMs);
-		if (!consumeAttempt(database, state)) {
+		if (!await consumeAttempt(database, state)) {
 			throw new WorkspaceError(400, 'TooManyAttempts');
 		}
 	}
@@ -608,20 +633,20 @@ export function createAccountSecurityRuntime({ auth, database, secret: providedS
 		const body = await readJsonBody(ctx);
 		const code = normalizeTotpCode(body.code);
 		const userId = state.challenge.userId;
-		const row = twoFactorRow(database, userId);
-		requireChallengeAttempt(state, row, nowMs);
+		const row = await runSteps(twoFactorRow(database, userId));
+		await requireChallengeAttempt(state, row, nowMs);
 		const result = await verifyTotpCode({ userId, row, code, nowMs });
 		if (!result.ok) {
 			if (result.reason === 'replayed') {
 				throw new WorkspaceError(401, accountSecurityErrorCodes.totpCodeReplayed);
 			}
-			recordFailure(userId, nowMs);
+			await recordFailure(userId, nowMs);
 			throw new WorkspaceError(401, accountSecurityErrorCodes.invalidTotpCode);
 		}
 		const secret = await requireSecret();
-		const token = exchangeChallengeForSession({
+		const token = await exchangeChallengeForSession({
 			state, row, ctx, nowMs,
-			consumeFactor: () => claimTotpStep(database, userId, result.step, nowMs),
+			consumeFactor: function* () { yield* claimTotpStep(database, userId, result.step, nowMs); },
 		});
 		return { body: { ok: true }, setCookie: sessionCookie(secret, token, idle), clearChallenge: true, userId };
 	}
@@ -636,8 +661,8 @@ export function createAccountSecurityRuntime({ auth, database, secret: providedS
 		const body = await readJsonBody(ctx);
 		const supplied = normalizeRecoveryCode(body.code);
 		const userId = state.challenge.userId;
-		const row = twoFactorRow(database, userId);
-		requireChallengeAttempt(state, row, nowMs);
+		const row = await runSteps(twoFactorRow(database, userId));
+		await requireChallengeAttempt(state, row, nowMs);
 		const secret = await requireSecret();
 		const stored = await decodeEncryptedCodes(secret, row.backupCodes);
 		let matched;
@@ -645,15 +670,15 @@ export function createAccountSecurityRuntime({ auth, database, secret: providedS
 			matched = consumeRecoveryCode(supplied, stored);
 		} catch (error) {
 			if (error instanceof WorkspaceError && error.code === accountSecurityErrorCodes.invalidRecoveryCode) {
-				recordFailure(userId, nowMs);
+				await recordFailure(userId, nowMs);
 			}
 			throw error;
 		}
 		const encoded = await symmetricEncrypt({ key: secret, data: JSON.stringify(matched.remaining) });
-		const token = exchangeChallengeForSession({
+		const token = await exchangeChallengeForSession({
 			state, row, ctx, nowMs,
-			consumeFactor() {
-				const written = database.prepare('UPDATE twoFactor SET backupCodes = ? WHERE id = ? AND backupCodes = ?').run(encoded, row.id, row.backupCodes);
+			*consumeFactor() {
+				const written = yield database.prepare('UPDATE twoFactor SET backupCodes = ? WHERE id = ? AND backupCodes = ?').run(encoded, row.id, row.backupCodes);
 				if (Number(written.changes) !== 1) {
 					throw new WorkspaceError(409, 'ConcurrentRecoveryCodeRotation');
 				}
@@ -673,9 +698,9 @@ export function createAccountSecurityRuntime({ auth, database, secret: providedS
 		}
 	}
 
-	function recordFailure(userId, nowMs) {
-		writeTransaction(database, () => {
-			const row = twoFactorRow(database, userId);
+	async function recordFailure(userId, nowMs) {
+		await writeTransaction(database, userId, function* () {
+			const row = yield* twoFactorRow(database, userId);
 			if (!row || (row.lockedUntil && Date.parse(row.lockedUntil) > nowMs)) {
 				return;
 			}
@@ -683,13 +708,13 @@ export function createAccountSecurityRuntime({ auth, database, secret: providedS
 			const lockedUntil = count >= challengePolicy.accountLockMaxFailedAttempts
 				? new Date(nowMs + challengePolicy.accountLockDurationSeconds * 1000).toISOString()
 				: null;
-			database.prepare('UPDATE twoFactor SET failedVerificationCount = ?, lockedUntil = ? WHERE id = ?').run(count, lockedUntil, row.id);
+			yield database.prepare('UPDATE twoFactor SET failedVerificationCount = ?, lockedUntil = ? WHERE id = ?').run(count, lockedUntil, row.id);
 		});
 	}
 
 	async function enroll({ ctx, state }) {
-		const current = requireCurrentSession(state);
-		const user = userRow(database, current.userId);
+		const current = await runSteps(requireCurrentSession(state));
+		const user = await runSteps(userRow(database, current.userId));
 		const body = await readJsonBody(ctx);
 		await assertPassword(current.userId, optionalString(body, 'password'));
 		const secret = await requireSecret();
@@ -697,16 +722,16 @@ export function createAccountSecurityRuntime({ auth, database, secret: providedS
 		const encryptedSecret = await symmetricEncrypt({ key: secret, data: plainSecret });
 		const codes = generateRecoveryCodes({ count: recoveryCodeParameters.count });
 		const encryptedCodes = await symmetricEncrypt({ key: secret, data: JSON.stringify(codes) });
-		writeTransaction(database, () => {
-			requireCurrentSession(state);
-			const existing = twoFactorRow(database, current.userId);
+		await writeTransaction(database, current.userId, function* () {
+			yield* requireCurrentSession(state);
+			const existing = yield* twoFactorRow(database, current.userId);
 			if (existing?.verified) {
 				throw new WorkspaceError(409, accountSecurityErrorCodes.totpAlreadyEnrolled);
 			}
 			if (existing) {
-				database.prepare('UPDATE twoFactor SET secret = ?, backupCodes = ?, verified = 0, failedVerificationCount = 0, lockedUntil = NULL WHERE id = ?').run(encryptedSecret, encryptedCodes, existing.id);
+				yield database.prepare('UPDATE twoFactor SET secret = ?, backupCodes = ?, verified = FALSE, failedVerificationCount = 0, lockedUntil = NULL WHERE id = ?').run(encryptedSecret, encryptedCodes, existing.id);
 			} else {
-				database.prepare('INSERT INTO twoFactor (id, secret, backupCodes, userId, verified, failedVerificationCount, lockedUntil) VALUES (?, ?, ?, ?, 0, 0, NULL)').run(generateRandomString(32), encryptedSecret, encryptedCodes, current.userId);
+				yield database.prepare('INSERT INTO twoFactor (id, secret, backupCodes, userId, verified, failedVerificationCount, lockedUntil) VALUES (?, ?, ?, ?, FALSE, 0, NULL)').run(generateRandomString(32), encryptedSecret, encryptedCodes, current.userId);
 			}
 		});
 		const uri = totpUri(plainSecret, user?.email ?? user?.username ?? current.userId);
@@ -717,40 +742,41 @@ export function createAccountSecurityRuntime({ auth, database, secret: providedS
 	}
 
 	async function confirmEnrollment({ ctx, state, nowMs }) {
-		const current = requireCurrentSession(state);
+		const current = await runSteps(requireCurrentSession(state));
 		const body = await readJsonBody(ctx);
 		const code = normalizeTotpCode(body.code);
-		const row = twoFactorRow(database, current.userId);
+		const row = await runSteps(twoFactorRow(database, current.userId));
 		if (!row || row.verified) {
 			throw new WorkspaceError(409, row ? accountSecurityErrorCodes.totpAlreadyEnrolled : accountSecurityErrorCodes.totpNotEnrolled);
 		}
 		assertUnlocked(row, nowMs);
 		const result = await verifyTotpCode({ userId: current.userId, row, code, nowMs, allowUnverified: true });
 		if (!result.ok) {
-			recordFailure(current.userId, nowMs);
+			await recordFailure(current.userId, nowMs);
 			throw new WorkspaceError(401, result.reason === 'replayed' ? accountSecurityErrorCodes.totpCodeReplayed : accountSecurityErrorCodes.invalidTotpCode);
 		}
-		writeTransaction(database, () => {
-			requireCurrentSession(state);
-			const updated = database.prepare(
-				'UPDATE twoFactor SET verified = 1, failedVerificationCount = 0, lockedUntil = NULL WHERE id = ? AND secret = ? AND verified = 0',
+		await writeTransaction(database, current.userId, function* () {
+			yield* requireCurrentSession(state);
+			const updated = yield database.prepare(
+				'UPDATE twoFactor SET verified = TRUE, failedVerificationCount = 0, lockedUntil = NULL WHERE id = ? AND secret = ? AND verified = FALSE',
 			).run(row.id, row.secret);
 			if (Number(updated.changes) !== 1) {
 				throw new WorkspaceError(409, 'TotpEnrollmentChanged');
 			}
-			claimTotpStep(database, current.userId, result.step, nowMs);
-			database.prepare('UPDATE user SET twoFactorEnabled = 1 WHERE id = ?').run(current.userId);
+			yield* claimTotpStep(database, current.userId, result.step, nowMs);
+			yield database.prepare('UPDATE user SET twoFactorEnabled = TRUE WHERE id = ?').run(current.userId);
+			yield* markSessionFactor(database, current.id);
 		});
 		return { body: { ok: true, twoFactorEnabled: true } };
 	}
 
 	async function verifyManagementFactor({ state, password, code, nowMs }) {
-		const current = requireCurrentSession(state);
+		const current = await runSteps(requireCurrentSession(state));
 		await assertPassword(current.userId, password);
 		if (!code) {
 			throw new WorkspaceError(403, accountSecurityErrorCodes.reauthenticationRequired);
 		}
-		const row = twoFactorRow(database, current.userId);
+		const row = await runSteps(twoFactorRow(database, current.userId));
 		if (!row?.verified) {
 			throw new WorkspaceError(409, accountSecurityErrorCodes.totpNotEnrolled);
 		}
@@ -775,19 +801,19 @@ export function createAccountSecurityRuntime({ auth, database, secret: providedS
 		});
 		const token = generateRandomString(32);
 		const { ipAddress, userAgent } = metadataOf(ctx);
-		const revoked = writeTransaction(database, () => {
-			requireCurrentSession(state);
-			const deleted = database.prepare('DELETE FROM twoFactor WHERE id = ? AND secret = ? AND backupCodes = ?').run(row.id, row.secret, row.backupCodes);
+		const revoked = await writeTransaction(database, current.userId, function* () {
+			yield* requireCurrentSession(state);
+			const deleted = yield database.prepare('DELETE FROM twoFactor WHERE id = ? AND secret = ? AND backupCodes = ?').run(row.id, row.secret, row.backupCodes);
 			if (Number(deleted.changes) !== 1) {
 				throw new WorkspaceError(409, 'TotpEnrollmentChanged');
 			}
 			if (step !== undefined) {
-				claimTotpStep(database, current.userId, step, nowMs);
+				yield* claimTotpStep(database, current.userId, step, nowMs);
 			}
-			database.prepare('UPDATE user SET twoFactorEnabled = 0 WHERE id = ?').run(current.userId);
-			const otherSessions = deleteOtherSessions(database, current.userId, current.token);
-			deleteSession(database, current.token);
-			insertSession(database, { userId: current.userId, token, idleSeconds: idle, ipAddress, userAgent, nowMs });
+			yield database.prepare('UPDATE user SET twoFactorEnabled = FALSE WHERE id = ?').run(current.userId);
+			const otherSessions = yield* deleteOtherSessions(database, current.userId, current.token);
+			yield* deleteSession(database, current.token);
+			yield* insertSession(database, { userId: current.userId, token, idleSeconds: idle, ipAddress, userAgent, nowMs });
 			return otherSessions;
 		});
 		return {
@@ -803,25 +829,25 @@ export function createAccountSecurityRuntime({ auth, database, secret: providedS
 		});
 		const codes = generateRecoveryCodes({ count: recoveryCodeParameters.count });
 		const encoded = await symmetricEncrypt({ key: secret, data: JSON.stringify(codes) });
-		writeTransaction(database, () => {
-			requireCurrentSession(state);
-			const written = database.prepare('UPDATE twoFactor SET backupCodes = ? WHERE id = ? AND secret = ? AND backupCodes = ?').run(encoded, row.id, row.secret, row.backupCodes);
+		await writeTransaction(database, current.userId, function* () {
+			yield* requireCurrentSession(state);
+			const written = yield database.prepare('UPDATE twoFactor SET backupCodes = ? WHERE id = ? AND secret = ? AND backupCodes = ?').run(encoded, row.id, row.secret, row.backupCodes);
 			if (Number(written.changes) !== 1) {
 				throw new WorkspaceError(409, 'ConcurrentRecoveryCodeRotation');
 			}
 			if (step !== undefined) {
-				claimTotpStep(database, current.userId, step, nowMs);
+				yield* claimTotpStep(database, current.userId, step, nowMs);
 			}
 		});
 		return { body: { backupCodes: codes } };
 	}
 
 	async function changePassword({ ctx, state }) {
-		const current = requireCurrentSession(state);
+		const current = await runSteps(requireCurrentSession(state));
 		const body = await readJsonBody(ctx);
 		const currentPassword = optionalString(body, 'currentPassword');
 		const newPassword = requireString(body, 'newPassword');
-		const user = userRow(database, current.userId);
+		const user = await runSteps(userRow(database, current.userId));
 		// Order matters: reauthentication first, then policy. A wrong current
 		// password must not reveal whether the new one would have been acceptable.
 		const accountId = await assertPassword(current.userId, currentPassword);
@@ -831,29 +857,25 @@ export function createAccountSecurityRuntime({ auth, database, secret: providedS
 		const { ipAddress, userAgent } = metadataOf(ctx);
 		const token = generateRandomString(32);
 		const nowMs = Date.now();
-		database.exec('BEGIN IMMEDIATE');
-		try {
-			database.prepare('UPDATE account SET password = ?, updatedAt = ? WHERE id = ?').run(hashed, new Date(nowMs).toISOString(), accountId);
-			deleteOtherSessions(database, current.userId, current.token);
-			deleteSession(database, current.token);
-			insertSession(database, { userId: current.userId, token, idleSeconds: idle, ipAddress, userAgent, nowMs });
-			database.exec('COMMIT');
-		} catch (error) {
-			try {
-				database.exec('ROLLBACK');
-			} catch {
-				// ignore
-			}
-			throw error;
-		}
+		await writeTransaction(database, current.userId, function* () {
+			yield* requireCurrentSession(state);
+			yield database.prepare('UPDATE account SET password = ?, updatedAt = ? WHERE id = ?').run(hashed, new Date(nowMs).toISOString(), accountId);
+			const proved = database.hasSecondFactor
+				? yield database.prepare('SELECT 1 FROM account_session_factor WHERE session_id = ?').get(current.id)
+				: undefined;
+			yield* deleteOtherSessions(database, current.userId, current.token);
+			yield* deleteSession(database, current.token);
+			const issued = yield* insertSession(database, { userId: current.userId, token, idleSeconds: idle, ipAddress, userAgent, nowMs });
+			if (proved) yield* markSessionFactor(database, issued.id);
+		});
 		const secret = await requireSecret();
 		// The caller keeps their identity but receives a fresh token: every other
 		// device is now anonymous while this one stays signed in (E1-E3).
 		return { body: { ok: true }, setCookie: sessionCookie(secret, token, idle), userId: current.userId };
 	}
 
-	function labelsFor(userId) {
-		const rows = database.prepare('SELECT session_id, label FROM account_session_label WHERE user_id = ?').all(userId);
+	function* labelsFor(userId) {
+		const rows = yield database.prepare('SELECT session_id, label FROM account_session_label WHERE user_id = ?').all(userId);
 		const labels = Object.create(null);
 		for (const row of rows) {
 			labels[String(row.session_id)] = String(row.label);
@@ -862,9 +884,9 @@ export function createAccountSecurityRuntime({ auth, database, secret: providedS
 	}
 
 	async function listSessions({ ctx, state, nowMs }) {
-		const current = requireCurrentSession(state);
+		const current = await runSteps(requireCurrentSession(state));
 		const includeNetwork = ctx.query?.includeNetwork === 'true';
-		const sessions = sessionRows(database, current.userId, { excludeToken: undefined });
+		const sessions = await runSteps(sessionRows(database, current.userId));
 		const described = describeSessions(sessions.map(row => ({
 			id: row.id,
 			token: row.token,
@@ -875,7 +897,7 @@ export function createAccountSecurityRuntime({ auth, database, secret: providedS
 			userAgent: row.userAgent,
 		})), {
 			currentToken: current.token,
-			labels: labelsFor(current.userId),
+			labels: await runSteps(labelsFor(current.userId)),
 			includeNetwork,
 			nowMs,
 		});
@@ -883,18 +905,18 @@ export function createAccountSecurityRuntime({ auth, database, secret: providedS
 	}
 
 	async function labelSession({ ctx, state, route, nowMs }) {
-		const current = requireCurrentSession(state);
+		const current = await runSteps(requireCurrentSession(state));
 		const sessionId = requireSessionId(route.params.sessionId);
 		const body = await readJsonBody(ctx);
 		const label = normalizeDeviceLabel(body.label);
 		if (label === undefined) {
 			throw new WorkspaceError(400, accountSecurityErrorCodes.invalidDeviceLabel);
 		}
-		const match = sessionRows(database, current.userId).find(row => sessionIdFor(row.token) === sessionId);
+		const match = (await runSteps(sessionRows(database, current.userId))).find(row => sessionIdFor(row.token) === sessionId);
 		if (!match) {
 			throw new WorkspaceError(404, accountSecurityErrorCodes.sessionNotFound);
 		}
-		database.prepare(
+		await database.prepare(
 			`INSERT INTO account_session_label (session_id, user_id, label, updated_at) VALUES (?, ?, ?, ?)
 			ON CONFLICT (session_id) DO UPDATE SET label = excluded.label, updated_at = excluded.updated_at`,
 		).run(sessionId, current.userId, label, nowMs);
@@ -902,14 +924,14 @@ export function createAccountSecurityRuntime({ auth, database, secret: providedS
 	}
 
 	async function revokeSession({ ctx, state, route }) {
-		const current = requireCurrentSession(state);
+		const current = await runSteps(requireCurrentSession(state));
 		const sessionId = requireSessionId(route.params.sessionId);
-		const match = sessionRows(database, current.userId).find(row => sessionIdFor(row.token) === sessionId);
+		const match = (await runSteps(sessionRows(database, current.userId))).find(row => sessionIdFor(row.token) === sessionId);
 		if (!match) {
 			throw new WorkspaceError(404, accountSecurityErrorCodes.sessionNotFound);
 		}
-		deleteSession(database, match.token);
-		database.prepare('DELETE FROM account_session_label WHERE session_id = ?').run(sessionId);
+		await runSteps(deleteSession(database, match.token));
+		await database.prepare('DELETE FROM account_session_label WHERE session_id = ?').run(sessionId);
 		const revokedCurrent = match.token === current.token;
 		return {
 			body: { ok: true, revoked: true, current: revokedCurrent },
@@ -948,13 +970,13 @@ export function createAccountSecurityRuntime({ auth, database, secret: providedS
 		handle,
 		config: Object.freeze({ idleSeconds: idle, routes: accountSecurityRoutes }),
 		// Exposed for tests and for the gateway's logout path.
-		clearChallenge(identifier) {
+		async clearChallenge(identifier) {
 			if (typeof identifier !== 'string') {
 				return;
 			}
-			database.prepare('DELETE FROM verification WHERE identifier IN (?, ?)').run(identifier, '2fa-attempts-' + identifier);
+			await database.prepare('DELETE FROM verification WHERE identifier IN (?, ?)').run(identifier, '2fa-attempts-' + identifier);
 		},
-		touchSession: token => touchSession(database, token, Date.now()),
+		touchSession: token => runSteps(touchSession(database, token, Date.now())),
 	};
 }
 

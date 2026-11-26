@@ -1,6 +1,23 @@
 import { webColorScheme } from './login-page.mjs';
 
 const copy = {
+	securityTitle: ['Tenant security', '租户安全', '租戶安全', 'テナントのセキュリティ'],
+	securityRequire: ['Require two-factor authentication', '要求双因素验证', '要求雙因素驗證', '二要素認証を必須にする'],
+	securityOptional: ['Make two-factor authentication optional', '取消强制双因素验证', '取消強制雙因素驗證', '二要素認証を任意にする'],
+	securityRequired: ['Two-factor authentication is required.', '此租户要求双因素验证。', '此租戶要求雙因素驗證。', '二要素認証が必須です。'],
+	securityEnrollment: ['Open account security', '打开账户安全', '開啟帳戶安全', 'アカウントのセキュリティを開く'],
+	securityVerify: ['Set up two-factor authentication or sign in again to verify this session.', '请绑定双因素验证，或重新登录完成二次验证。', '請綁定雙因素驗證，或重新登入完成二次驗證。', '二要素認証を設定するか、再度サインインして確認してください。'],
+	'tenant.security.changed': ['Tenant security policy changed', '更改租户安全策略', '變更租戶安全策略', 'テナントのセキュリティポリシーを変更'],
+
+	platformTitle: ['Platform tenants', '平台租户', '平台租戶', 'プラットフォームテナント'],
+	createTenant: ['Create tenant', '创建租户', '建立租戶', 'テナントを作成'],
+	createWorkspace: ['Create workspace', '创建工作区', '建立工作區', 'ワークスペースを作成'],
+	managedWorkspaces: ['Manage workspace permissions', '管理工作区权限', '管理工作區權限', 'ワークスペース権限を管理'],
+	name: ['Name', '名称', '名稱', '名前'],
+	initialAdmin: ['Initial administrator', '首位管理员', '首位管理員', '最初の管理者'],
+	initialOwner: ['Initial owner', '首位所有者', '首位擁有者', '最初の所有者'],
+	noAccess: ['No access', '无权限', '無權限', '権限なし'],
+	lastOwner: ['Keep at least one workspace owner.', '工作区至少要保留一位所有者。', '工作區至少要保留一位擁有者。', 'ワークスペースには少なくとも 1 人の所有者が必要です。'],
 	// Each row follows the locale order below.
 	title: ['Tenant management', '租户管理', '租戶管理', 'テナント管理'],
 	back: ['Back to workspace', '返回工作区', '返回工作區', 'ワークスペースへ戻る'],
@@ -19,7 +36,6 @@ const copy = {
 	editor: ['Editor', '编辑者', '編輯者', '編集者'],
 	viewer: ['Viewer', '查看者', '檢視者', '閲覧者'],
 	owner: ['Owner', '所有者', '擁有者', '所有者'],
-	noAccess: ['No access', '无访问权限', '沒有存取權限', 'アクセス権なし'],
 	token: ['Invitation token', '邀请码', '邀請碼', '招待トークン'],
 	tokenHelp: ['Copy this one-time token and share it with the recipient. It grants tenant membership. Workspace access is assigned separately.', '请复制这枚一次性邀请码并交给受邀人。工作区访问权限需另行分配。', '請複製此一次性邀請碼並交給受邀者。工作區存取權限須另行分配。', 'この使い捨てトークンをコピーして招待先に共有してください。ワークスペースの権限は別途付与します。'],
 	dismiss: ['Hide token', '隐藏邀请码', '隱藏邀請碼', 'トークンを隠す'],
@@ -39,12 +55,15 @@ const copy = {
 	network: ["The server could not be reached. Check your connection and try again.", "无法连接服务器，请检查网络后重试。", "無法連線至伺服器，請檢查網路後再試。", "サーバーに接続できません。接続を確認して再試行してください。"],
 	denied: ["You do not have permission for this management action.", "你没有执行此管理操作的权限。", "你沒有執行此管理操作的權限。", "この管理操作を行う権限がありません。"],
 	invalidEmail: ["Enter a valid email address.", "请输入有效的电子邮箱地址。", "請輸入有效的電子郵件地址。", "有効なメールアドレスを入力してください。"],
+	invalidName: ["Enter a name of 1 to 128 characters.", "请输入 1 到 128 个字符的名称。", "請輸入 1 至 128 個字元的名稱。", "名前は 1～128 文字で入力してください。"],
 	invalidRole: ["Select an available role and try again.", "请选择一个可用角色后重试。", "請選擇可用的角色後再試。", "利用可能なロールを選択して再試行してください。"],
 	missing: ["This account, tenant, or workspace is no longer available. Refresh the page.", "此账号、租户或工作区当前不可用，请刷新页面。", "此帳號、租戶或工作區目前無法使用，請重新整理頁面。", "このアカウント、テナント、またはワークスペースは利用できません。ページを更新してください。"],
 	conflict: ['This record changed. Refresh and try again.', '记录有变更，请刷新后重试。', '記錄已變更，請重新整理後再試。', '記録が変更されました。更新して再試行してください。'],
 	lastAdmin: ['Keep at least one tenant administrator.', '租户至少要保留一位管理员。', '租戶至少須保留一位管理員。', 'テナントには少なくとも 1 人の管理者が必要です。'],
 	badToken: ['The invitation is invalid, expired, or already used.', '邀请无效、已过期或已被使用。', '邀請無效、已過期或已被使用。', '招待は無効、有効期限切れ、または使用済みです。'],
 	signIn: ['Sign in', '登录', '登入', 'サインイン'],
+	'workspace.create': ['Workspace created', '创建工作区', '建立工作區', 'ワークスペース作成'],
+	'workspace.member.role': ['Workspace permissions changed', '更改工作区权限', '變更工作區權限', 'ワークスペース権限変更'],
 	'tenant.create': ['Tenant created', '创建租户', '建立租戶', 'テナント作成'],
 	'tenant.seed': ['Tenant initialized', '初始化租户', '初始化租戶', 'テナント初期化'],
 	'invitation.issue': ['Invitation created', '创建邀请', '建立邀請', '招待作成'],
@@ -55,10 +74,10 @@ const copy = {
 };
 const locales = ['en', 'zh-cn', 'zh-tw', 'ja'];
 
-export function tenantManagementPage({ locale, scheme, accountId }) {
+export function tenantManagementPage({ locale, scheme, accountId, managed = false }) {
 	const language = locales.includes(locale) ? locale : 'en';
 	const strings = Object.fromEntries(Object.entries(copy).map(([key, labels]) => [key, labels[locales.indexOf(language)]]));
-	const config = Buffer.from(JSON.stringify({ strings, accountId })).toString('base64');
+	const config = Buffer.from(JSON.stringify({ strings, accountId, managed })).toString('base64');
 	const { title, back, refresh, accept, token, tenant, workspaces, members, invitations, invite, email, role, member, admin, tokenHelp, dismiss, audit, signIn } = strings;
 	return `<!doctype html><html lang="${language}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -76,10 +95,22 @@ ul{padding-inline-start:1.4rem}li{margin-block:.35rem;overflow-wrap:anywhere}.id
 <body data-config="${config}"><main><header><h1>${title}</h1><a href="/">${back}</a></header>
 <div class="row"><label for="tenant">${tenant}<select id="tenant"></select></label><button id="refresh" type="button">${refresh}</button></div>
 <p id="notice" role="status" aria-live="polite">${strings.loading}</p><a id="sign-in" href="/login" hidden>${signIn}</a>
+${managed ? `<section id="platform" hidden><h2>${strings.platformTitle}</h2>
+<form id="create-tenant" class="row"><label>${strings.name}<input name="name" required maxlength="128"></label>
+<label>${strings.initialAdmin}<select name="initialAdminId" required></select></label>
+<button type="submit">${strings.createTenant}</button></form><ul id="platform-tenants"></ul></section>` : ''}
 <section><h2>${accept}</h2><form id="accept" class="row"><label for="invite-input">${token}<input id="invite-input" required maxlength="512" autocomplete="off" spellcheck="false"></label><button type="submit">${accept}</button></form></section>
+${managed ? `<section id="tenant-security" hidden><h2>${strings.securityTitle}</h2>
+<p id="tenant-security-state"></p><div class="row"><a href="/account/security">${strings.securityEnrollment}</a>
+<a href="/login?switch=1">${signIn}</a><button id="tenant-security-save" type="button" hidden></button></div></section>` : ''}
 <div id="scope" hidden>
 <section><h2>${workspaces}</h2><ul id="workspaces"></ul></section>
 <div id="admin" hidden>
+${managed ? `<section><h2>${strings.managedWorkspaces}</h2>
+<form id="create-workspace" class="row"><label>${strings.name}<input name="name" required maxlength="128"></label>
+<label>${strings.initialOwner}<select name="initialOwnerId" required></select></label>
+<button type="submit">${strings.createWorkspace}</button></form>
+<label>${strings.workspaces}<select id="workspace-picker"></select></label><ul id="workspace-grants"></ul></section>` : ''}
 <section><h2>${members}</h2><ul id="members"></ul></section>
 <section><h2>${invitations}</h2><form id="issue" class="row">
 <label for="email">${email}<input id="email" type="email" required maxlength="254"></label>

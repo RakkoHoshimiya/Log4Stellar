@@ -522,6 +522,12 @@ test('the backlinks endpoint answers with source path, revision and position', {
 		assert.equal(link.line, 1);
 		assert.equal(link.column, 5);
 		assert.equal(link.anchor, 'intro');
+		const byPath = await call(backend, store, workspaceId, {
+			path: knowledgeMountPath + '/backlinks',
+			query: { path: '/notes/target.md' },
+		});
+		assert.equal(byPath.status, 200);
+		assert.deepEqual(byPath.body, body);
 	});
 });
 
@@ -631,3 +637,38 @@ test('the tag endpoints list the cloud and the occurrences of one tag', { skip }
 
 // Keep the module-level store from holding a pool open after the last test.
 test.after(() => closeKnowledgeStore());
+
+test('knowledge reads automatically index saved revisions and paginate all tags and occurrences', { skip }, async () => {
+	await scenario(async ({ backend, store, workspaceId }) => {
+		const tagPath = knowledgeMountPath + '/tags';
+		const path = '/paged.md';
+		const initial = Array.from({ length: 205 }, (_, index) =>
+			'#tag' + String(index).padStart(3, '0') + ' #shared');
+		await writeNote(backend, path, initial.join('\n'));
+		const get = (route, query) => call(backend, store, workspaceId, { path: route, query, role: 'viewer' });
+
+		const first = await get(tagPath, { limit: '200' });
+		assert.equal(first.status, 200);
+		assert.equal(first.body.tags.length, 200);
+		assert.ok(first.body.nextCursor);
+		const last = await get(tagPath, { limit: '200', cursor: first.body.nextCursor });
+		assert.equal(last.status, 200);
+		assert.equal(last.body.tags.length, 6);
+		assert.equal(last.body.nextCursor, null);
+		assert.equal(new Set([...first.body.tags, ...last.body.tags].map(row => row.tagKey)).size, 206);
+		assert.equal((await get(tagPath, { prefix: 'tag', cursor: first.body.nextCursor })).status, 400);
+
+		const occurrences = await get(tagPath + '/shared', { limit: '200' });
+		assert.equal(occurrences.body.occurrences.length, 200);
+		const rest = await get(tagPath + '/shared', { cursor: occurrences.body.nextCursor });
+		assert.deepEqual(rest.body.occurrences.map(row => row.line), [201, 202, 203, 204, 205]);
+		assert.equal(rest.body.nextCursor, null);
+		assert.equal((await get(tagPath + '/tag000', { cursor: occurrences.body.nextCursor })).status, 400);
+
+		await writeNote(backend, path, '#new-tag [[Missing]]\n');
+		const saved = await get(tagPath, {});
+		assert.deepEqual(saved.body.tags.map(row => row.tagKey), ['new-tag']);
+		const broken = await get(knowledgeMountPath + '/broken', {});
+		assert.deepEqual(broken.body.links.map(row => row.raw), ['Missing']);
+	});
+});

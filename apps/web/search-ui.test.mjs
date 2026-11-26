@@ -53,7 +53,7 @@ function sandbox({ fetch: fetchImpl, origin = 'https://workspace.invalid', langu
 		commands: { registerCommand: () => ({ dispose() {} }), executeCommand: async () => undefined },
 		extensions: { getExtension: () => undefined },
 		window: {
-			registerCustomEditorProvider: (type, provider) => { registered.officeEditor = { type, provider }; return { dispose() {} }; },
+			registerCustomEditorProvider: () => ({ dispose() {} }),
 			showQuickPick: async () => undefined,
 			showWarningMessage: async () => undefined,
 			showInformationMessage: async () => undefined,
@@ -172,7 +172,7 @@ test('each hit is reported with a plain-text preview and a highlight range', asy
 	// markup, so an HTML note is displayed and never executed.
 	assert.equal(reported[0].preview.text, '发布计划 alpha');
 	assert.deepEqual(plain(reported[0].preview.matches), [{ start: { line: 0, character: 0 }, end: { line: 0, character: 4 } }]);
-	assert.deepEqual(plain(reported[0].ranges), [{ start: { line: 0, character: 0 }, end: { line: 0, character: 4 } }]);
+	assert.deepEqual(plain(reported[0].ranges), [{ start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }]);
 	assert.deepEqual(plain(complete), { limitHit: false });
 });
 
@@ -182,13 +182,14 @@ test('a note containing HTML is reported as text and no markup is constructed', 
 	const { instance } = await textSearch({
 		fetch: async () => new Response(JSON.stringify(page([{
 			fileId: 'f'.repeat(36), path: '/notes/x.md', revisionId: 'r'.repeat(36),
-			line: 1, column: 1, match: 'body', excerpt, excerptOffset: 24, excerptLength: 4,
+			line: 12, column: 7, match: 'body', excerpt, excerptOffset: 24, excerptLength: 4,
 		}])), { status: 200, headers: { 'content-type': 'application/json' } }),
 	});
 	await instance.provideTextSearchResults({ pattern: 'plan' }, { folder: folder.uri }, { report: value => reported.push(value) }, token());
 	// The string is passed through verbatim: escaping it here would break the offsets,
 	// and the editor renders a preview as text.
 	assert.equal(reported[0].preview.text, excerpt);
+	assert.deepEqual(plain(reported[0].ranges), [{ start: { line: 11, character: 6 }, end: { line: 11, character: 10 } }]);
 	assert.ok(reported[0].preview.text.includes('<script>'));
 	assert.equal(reported[0].preview.text.constructor, String);
 });
@@ -323,5 +324,4 @@ test('the search provider is registered for the workspace scheme', async () => {
 	assert.equal(typeof box.registered.textSearch.provideTextSearchResults, 'function');
 	// The file search provider from the previous feature must keep working.
 	assert.ok(box.registered.fileSearch);
-	assert.equal(box.registered.officeEditor.type, 'log4stellar.officePreview');
 });
