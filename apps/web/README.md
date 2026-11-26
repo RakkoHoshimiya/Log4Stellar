@@ -10,7 +10,10 @@
 |---|---|
 | 工作区、角色与 capability 判权 | [docs/workspace-access.md](docs/workspace-access.md) |
 | Web 租户管理、邀请与审计 | [docs/multi-tenant.md](docs/multi-tenant.md) |
-| 空库平台租户与工作区（隔离验收） | [docs/managed-workspaces.md](docs/managed-workspaces.md) |
+| 托管模式初始化 | [docs/managed-workspaces.md](docs/managed-workspaces.md) |
+| 租户强制双因素、独立桶与迁移 | [docs/tenant-advanced.md](docs/tenant-advanced.md) |
+| 历史版本、附件正文与 OCR | [docs/extended-search.md](docs/extended-search.md) |
+| 大附件断点续传 | [docs/resumable-uploads.md](docs/resumable-uploads.md) |
 | 增量同步（快照、游标、冲突） | [docs/incremental-sync.md](docs/incremental-sync.md) |
 | 账户安全与双因素 | [docs/account-security.md](docs/account-security.md)、[运行时交付](docs/account-security-takeover.md)、[接线方案](docs/account-security-wiring.md) |
 | Git 仓库接入 | [docs/git-integration.md](docs/git-integration.md) |
@@ -22,7 +25,8 @@
 ```
 apps/web/
   serve-demo.mjs             唯一服务进程入口（HTTPS 网关 + 工作台静态资源）
-  auth.mjs                   账号库（better-auth + SQLite）、会话、闲置过期
+  auth.mjs                   本地 SQLite 账号、会话、闲置过期
+  managed-auth.mjs           托管 PostgreSQL 账号、会话与租户管理
   auth-gateway.mjs           网关中间件：登录页、工作区选择、各后端的路由与判权
   login-page.mjs             登录页与第二因素表单的 HTML
   account-security*.mjs      账户安全运行时、DDL、页面、纯校验函数
@@ -33,10 +37,11 @@ apps/web/
   sync-*.mjs                 增量同步契约、路由、存储、迁移
   git-*.mjs                  Git 契约、路由、仓库操作、凭证加密、迁移
   create-account.mjs         建号（命令行，密码走 stdin）
-  workspace-members.mjs      成员管理（命令行，唯一入口）
+  workspace-members.mjs      本地或旧版工作区成员管理
+  create-managed-account.mjs 托管账号与平台初始化
   import-workspace.mjs       把目录导入为新的存储工作区
-  backup-data.mjs            备份四件套 + manifest
-  restore-backup-objects.mjs 按 manifest 校验并写回对象
+  backup-data.mjs            加密备份和对象清单
+  restore-backup.mjs         验证、解密并恢复到独立目标
   build-web-release.mjs      构建自包含发布包
   verify-web-release.mjs     发布包隔离自检（临时 HTTPS + 临时账户库）
   web-release.mjs            发布包清单、指纹与 nodeMajor 校验
@@ -45,7 +50,7 @@ apps/web/
   test-support/              测试替身（目录型对象存储、验收脚本样例）
   tools/check-doc-links.mjs  文档相对链接与锚点检查
   workspace-extension/       Web 端 workspace-files 扩展（挂载与搜索提供者）
-  *.test.mjs                 27 个测试文件
+  *.test.mjs                 单元与集成测试
 ```
 
 ## 依赖与运行时
@@ -60,53 +65,39 @@ pnpm --dir apps/web --ignore-workspace install --frozen-lockfile
 
 `--ignore-workspace` 让安装停留在 `apps/web`，不要提升到仓库根的 workspace。
 
-六项直接依赖：`@aws-sdk/client-s3`、`@node-rs/argon2`、`@vscode/test-web`、`better-auth`、
-`pg`、`qrcode-generator`。缺任何一项都会在 import 阶段直接 `ERR_MODULE_NOT_FOUND`，而报错位置
-往往是引用它的运行时模块（例如 `account-security-runtime.mjs` 引用 `qrcode-generator`），
-不是解析失败的那个测试文件。
+服务端运行依赖以 [package.json](package.json) 与锁定文件为准。历史与附件搜索使用 PDF.js 提取 PDF 文本，用 Python 3 提取 OOXML。扫描件 OCR 和旧版 Office 依赖另行配置的转换沙箱。
 
 ## 隔离环境最小启动
 
-不需要 PostgreSQL、不需要对象存储、不需要碰生产：`local` 后端只用一个目录，测试与演示够用。
+先按[仓库根 README](../../README.md#构建测试与发布)构建发布包。以下示例用目录后端与 SQLite，适合试用工作台。请在 Bash 下执行。默认读取根 README 示例的发布目录，也可用 `LOG4STELLAR_LOCAL_RELEASE` 指向已有发布包。
 
-```sh
-# 1) 准备三个互不重叠的位置：账户库、笔记目录、TLS
+```bash
 umask 077
-export LOG4STELLAR_AUTH_DIR="$HOME/.config/log4stellar/web-isolated"
-mkdir -p "$LOG4STELLAR_AUTH_DIR"
-test -s "$LOG4STELLAR_AUTH_DIR/secret" || openssl rand -hex 32 > "$LOG4STELLAR_AUTH_DIR/secret"
-
-notes="$HOME/.local/state/log4stellar/notes-isolated"
-mkdir -p "$notes"
-
+release="${LOG4STELLAR_LOCAL_RELEASE:-$PWD/.build/log4stellar-web-release}"
+trial=$(mktemp -d)
+notes="$trial/notes"
+export LOG4STELLAR_AUTH_DIR="$trial/auth"
+mkdir -p "$notes" "$LOG4STELLAR_AUTH_DIR"
+printf '# 第一篇笔记\n' > "$notes/Welcome.md"
+openssl rand -hex 32 > "$LOG4STELLAR_AUTH_DIR/secret"
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
   -subj '/CN=Log4Stellar local' -addext 'subjectAltName=IP:127.0.0.1' \
-  -keyout /tmp/l4s-dev.key -out /tmp/l4s-dev.crt
+  -keyout "$trial/server.key" -out "$trial/server.crt"
 
-# 2) 必需环境变量（端口自己挑，示例用 18991 避免撞线上 18990）
 export LOG4STELLAR_WEB_ORIGIN=https://127.0.0.1:18991
-export LOG4STELLAR_TLS_CERT=/tmp/l4s-dev.crt
-export LOG4STELLAR_TLS_KEY=/tmp/l4s-dev.key
+export LOG4STELLAR_TLS_CERT="$trial/server.crt"
+export LOG4STELLAR_TLS_KEY="$trial/server.key"
 export LOG4STELLAR_STORAGE_BACKEND=local
 export LOG4STELLAR_WORKSPACE_ID=workspace-demo
 
-# 3) 建号：密码走 stdin，第二个参数显式给工作区 ID
-printf '%s' 'correct horse battery staple' | node apps/web/create-account.mjs alice workspace-demo
-# Created account alice as an owner of workspace-demo (workspace ID from the argument).
-
-# 4) 起服务（第三个参数是 Web 构建产物目录，--release 则读发布包）
-node apps/web/serve-demo.mjs "$notes" 18991 .build/log4stellar-web-l10n
-
-# 5) 冒烟
-curl --cacert /tmp/l4s-dev.crt -s -o /dev/null -w '%{http_code}\n' https://127.0.0.1:18991/login        # 200
-curl --cacert /tmp/l4s-dev.crt -s -o /dev/null -w '%{http_code}\n' https://127.0.0.1:18991/static/mount/ # 401
-```
-
-镜像一套已发布的包做同样的事，只把第 4 步换成 `--release`，并从包内启动：
-
-```sh
+read -rsp 'Test account password: ' account_password
+printf '\n'
+printf '%s' "$account_password" | node "$release/server/create-account.mjs" alice workspace-demo
+unset account_password
 node "$release/server/serve-demo.mjs" "$notes" 18991 --release
 ```
+
+从浏览器打开 `https://127.0.0.1:18991`。测试浏览器需要信任示例生成的证书。使用刚才创建的账号 `alice` 登录，在资源管理器中打开 `Welcome.md`。完整的租户和文件版本功能使用[托管模式](docs/managed-workspaces.md)。
 
 ### 从检出运行工作台（不走发布包）
 
@@ -114,7 +105,6 @@ node "$release/server/serve-demo.mjs" "$notes" 18991 --release
 工作台目录。后者用于改工作台源码时的验证，需要三步产物就位：
 
 ```sh
-export PATH=$HOME/.cache/log4stellar-toolchain/bin:$PATH   # node 24 + pnpm
 export NODE_OPTIONS=--max-old-space-size=5120
 
 # 1) 干净工作树先补齐依赖与 gitignore 的构建产物（见下方说明）
@@ -165,6 +155,7 @@ sh worktree-link-artifacts.sh <worktree-name>   # codicon.ttf 与扩展产物（
 |---|---|---|
 | `LOG4STELLAR_STORAGE_BACKEND` | `local` | `local` 或 `rustfs`；其它值报 `LOG4STELLAR_STORAGE_BACKEND must be local or rustfs.` |
 | `LOG4STELLAR_STORAGE_CONFIG` | 无 | `rustfs` 后端的存储配置 JSON 路径 |
+| `LOG4STELLAR_MANAGED_TENANTS` | 关闭 | 设为 `1` 并使用 `rustfs` 后端时，账号、会话、租户和权限使用 PostgreSQL |
 | `LOG4STELLAR_WORKSPACE_ID` | `log4stellar-main` | 本部署服务的存储工作区 ID（`rustfs` 后端下位置参数优先） |
 | `LOG4STELLAR_DEMO_HOST` | `127.0.0.1` | 监听地址；对外提供服务时改成对外地址 |
 | `LOG4STELLAR_DEMO_CLIENTS` | 无 | 逗号分隔的客户端 IP 白名单，命中不到直接 `403` |
@@ -187,13 +178,17 @@ sh worktree-link-artifacts.sh <worktree-name>   # codicon.ttf 与扩展产物（
 
 ## 账号与成员
 
+托管模式按[空库初始化](docs/managed-workspaces.md)创建平台管理员和账号，在「租户管理」中创建工作区、发放邀请并分配角色。租户安全策略和跨租户迁移见[高级租户管理](docs/tenant-advanced.md)。
+
+下列命令用于目录后端或旧版账号模式。
+
 ```sh
 # 建号：密码走 stdin，第二个参数是工作区 ID（省略则用 LOG4STELLAR_WORKSPACE_ID，再退内置默认）
 read -rsp 'Application password: ' account_password; printf '\n'
 printf '%s' "$account_password" | node apps/web/create-account.mjs example_user example-workspace
 unset account_password
 
-# 成员管理：唯一入口，本版本没有 HTTP 接口
+# 本地或旧版工作区成员管理
 node apps/web/workspace-members.mjs list --workspace example-workspace
 node apps/web/workspace-members.mjs workspaces
 node apps/web/workspace-members.mjs add example_editor --role editor --workspace example-workspace
@@ -385,8 +380,7 @@ node apps/web/tools/check-doc-links.mjs --list # 列出每条成功解析的链�
 ## 构建与校验发布包
 
 ```sh
-export PATH=$HOME/.cache/log4stellar-toolchain/bin:$PATH   # node 24 + pnpm
-export NODE_OPTIONS=--max-old-space-size=5120              # 工作台打包需要 >2GB 堆
+export NODE_OPTIONS=--max-old-space-size=7168
 
 release="$HOME/.local/share/log4stellar/releases/web-$(date +%Y%m%d-%H%M)"
 node apps/web/build-web-release.mjs "$release" /path/to/vscode-loc
@@ -395,7 +389,7 @@ node "$release/server/verify-web-release.mjs" "$release"
 
 构建流程与硬约束：
 
-1. **目标目录必须是全新的空目录**。已存在会抛 `Release directory already exists: <path>`；暂存目录
+1. **目标目录必须尚不存在**。已存在会抛 `Release directory already exists: <path>`；暂存目录
    是 `dirname(target)/.log4stellar-web-stage-*`。
 2. **构建前先跑全部 Web 测试**，失败即中止。
 3. 打工作台 bundle（`--target web --nls`）、生成语言包产物、拷 5 个内置 Web 扩展与
@@ -463,45 +457,15 @@ node "$release/server/serve-demo.mjs" log4stellar-main 18990 --release
 
 ## 备份与恢复
 
-```sh
-node "$release/server/backup-data.mjs" /path/to/new-backup
-LOG4STELLAR_BACKUP_BLOBS=1 node apps/web/backup-data.mjs /path/to/new-backup
-node apps/web/restore-backup-objects.mjs /path/to/new-backup /path/to/isolated-storage.json
-```
-
-备份产出四件套加一份 `manifest.json`：账户库（用 `VACUUM INTO` 复制，WAL 下直接 `cp` 会丢最近
-提交）、`secret`（TOTP 种子与恢复码的加密根）、`git-secret`、数据库 dump（`pg_dump --schema
-log4stellar`），manifest 记录各文件 sha256 与大小、成员数、条目数与对象摘要。
-
-恢复顺序固定，别跳步：
-
-1. 还原账户库 + `secret`（+ `git-secret`）。
-2. 还原 PostgreSQL schema。
-3. 按 `storage_file_versions.sha256` 逐对象核对存储侧字节。
-4. 幂等重放 `sync-migrate.mjs`。
-5. 启动新包、在隔离端口演练、确认后再切流量。
-
-本机没有 PostgreSQL 客户端时会回落到 `docker run --rm --network host postgres:18 pg_dump`；镜像内
-的二进制不能直接在宿主执行，且必须 `--network host` 才能连到数据库主机。可用
-`LOG4STELLAR_PG_DUMP_IMAGE` 覆盖镜像名。
-
-`apps/web/backup-data.mjs` 就是按上面的顺序做备份的：一份 manifest、五个必需成员（账户库快照、
-两把封装密钥、一次可重复读的 PostgreSQL dump、对象清单）加部署文件，全部用 AES-256-GCM 封装。
-`apps/web/restore-backup.mjs` 会在写入任何字节之前先校验整个备份。`apps/web/backup-schedule.mjs`
-用单实例锁跑每日备份，并以监控友好的退出码报告新鲜度。成员契约、加密信封格式与恢复演练结果见
-[备份与恢复契约](docs/backup-restore.md)。
-
-**没被恢复过的备份只是假设。** `apps/web/backup-drill.integration.test.mjs` 对真实服务做完整往返，
-并逐字节比对每个成员与对象：
+准备权限受限的备份密钥文件和独立的恢复目标。完整备份包含加密的账户与存储元数据、Git 凭据封存密钥和被引用的文件版本对象。托管模式的账户数据在 PostgreSQL 快照中。SQLite 模式额外生成账户库快照。
 
 ```sh
-LOG4STELLAR_IT=1 LOG4STELLAR_IT_STORAGE_CONFIG=/path/to/drill-storage.json \
-LOG4STELLAR_IT_AUTH_DIR=/path/to/drill-auth-parent \
-node --test --test-concurrency=1 apps/web/backup-drill.integration.test.mjs
+node apps/web/backup-data.mjs "$BACKUP_DIR" --scope=full --key-file="$BACKUP_KEY_FILE"
+node apps/web/restore-backup.mjs "$BACKUP_DIR" "$RESTORE_DIR" \
+  --key-file="$BACKUP_KEY_FILE" --objects-config="$ISOLATED_STORAGE_CONFIG"
 ```
 
-**对象存储侧可能无法桶级备份**：若生产凭证被限制在单个工作区前缀且禁止删除对象，备份脚本只能覆盖
-元数据，字节侧需要额外的只读凭证或存储卷级快照。
+恢复工具校验加密清单与对象，并把 SQL、账户相关文件及对象写入独立目标。随后按[备份与恢复手册](docs/backup-restore.md)导入隔离数据库，复验登录、文件版本、权限和回收站。定时备份与恢复验收见[运维手册](docs/ops-runbook.md)。
 
 ## 运行监控与探针
 
