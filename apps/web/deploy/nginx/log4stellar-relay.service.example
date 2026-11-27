@@ -1,0 +1,12 @@
+[Unit]
+Description=Log4Stellar outbound HTTPS relay
+After=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/ssh -NT -i %h/.ssh/log4stellar-relay -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=%h/.ssh/log4stellar-relay-known_hosts -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -o ServerAliveInterval=20 -o ServerAliveCountMax=3 -R 127.0.0.1:15443:127.0.0.1:19443 log4stellar-relay@relay.example.net
+Restart=always
+RestartSec=10s
+
+[Install]
+WantedBy=default.target

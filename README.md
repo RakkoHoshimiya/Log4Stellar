@@ -10,6 +10,8 @@ Log4Stellar 是一个基于 [Code - OSS](https://github.com/microsoft/vscode) �
 - **本地试用**。按 [Web 服务端说明的隔离环境最小启动](apps/web/README.md#隔离环境最小启动) 创建本地目录、测试账号和 HTTPS 证书。这个模式适合试用工作台。
 - **自托管部署**。采用 PostgreSQL 和 RustFS，按[空库租户与工作区](apps/web/docs/managed-workspaces.md) 初始化首个平台管理员，然后在「租户管理」中创建租户、工作区和成员授权。
 
+- **部署方式**。可以连接独立的 PostgreSQL 和 RustFS，也可以将 Web 与依赖运行在一个 Docker 或 Podman 容器。公网访问可通过 Nginx 和 SSH 反向隧道中转。[容器部署](apps/web/docs/container-deployment.md) · [公网中转](apps/web/docs/nginx-relay.md)
+
 ## 能力矩阵
 
 | 能力 | 当前范围 |
@@ -19,7 +21,7 @@ Log4Stellar 是一个基于 [Code - OSS](https://github.com/microsoft/vscode) �
 | 大附件上传 | Web 支持分片、进度、暂停、取消及断点续传。刷新后重选原文件可继续上传。 |
 | 当前笔记与知识关联 | 工作台全文搜索涵盖标题和 Markdown 正文，支持中文命中。反向链接、标签及断链面板支持更新和分页。 |
 | 历史与附件搜索 | 在命令面板运行「Log4Stellar: 历史版本与附件搜索」。支持历史 Markdown、纯文本及 PDF、DOCX、XLSX、PPTX 正文。启用额外提取器后，也可查扫描 PDF 与旧版 DOC、XLS、PPT。 |
-| Office 只读预览 | 启用 LibreOffice 转换后，DOCX、XLSX、PPTX 可在工作台预览，支持加载反馈、滚轮连续翻页和键盘滚动。 |
+| Office 与 PDF 只读预览 | DOCX、XLSX、PPTX 由 LibreOffice 转换。PDF 原件在工作台默认直接预览。支持加载反馈、滚轮连续翻页和键盘滚动。 |
 | 工作区与租户管理 | Web 界面支持租户、工作区、邀请、成员授权及审计。可为租户配置独立存储桶，运维可在维护窗口迁移或回迁工作区。 |
 | 登录与账户安全 | 账密登录、闲置过期、TOTP、恢复码、设备会话管理，以及按租户强制双因素验证。 |
 | 代码仓库接入 | 可绑定已授权的 Git 仓库，查看状态和提交，切换分支并通过 HTTPS 或 SSH 拉取和推送。 |

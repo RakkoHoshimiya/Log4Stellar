@@ -20,6 +20,8 @@
 | 工作区切换与旧草稿限制 | [docs/workspace-switch-migration.md](docs/workspace-switch-migration.md) |
 | 发布清单（含「改什么代码要同步改哪些文档」） | [docs/release-checklist.md](docs/release-checklist.md) |
 
+Docker 与 Podman 的两种部署方式见[容器部署](docs/container-deployment.md)。公网 HTTPS 中转见 [Nginx 与 SSH 公网中转](docs/nginx-relay.md)。
+
 ## 目录结构
 
 ```
