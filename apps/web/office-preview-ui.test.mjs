@@ -141,7 +141,7 @@ function environment({
 	const module = { exports: {} };
 	vm.runInNewContext(code, {
 		require: () => vscode, module, URL, URLSearchParams, Headers, Blob: globalThis.Blob,
-		createObjectURL: undefined, fetch,
+		createObjectURL: undefined, fetch, AbortController,
 	});
 	const exports = module.exports;
 
@@ -427,4 +427,40 @@ test('a preview request without a workspace authority is refused before fetching
 		);
 	}
 	assert.equal(called, false);
+});
+
+test('original PDF preview reads authenticated workspace bytes without Office conversion', async () => {
+	const { exports } = environment();
+	const pdf = new TextEncoder().encode('%PDF-1.7 fixture');
+	const target = { ...uri, path: '/docs/report.PDF' };
+	let released = false;
+	const token = {
+		onCancellationRequested() { return { dispose() { released = true; } }; },
+	};
+	const result = await exports.readPdfPreview({
+		async request(resource, query, { signal }) {
+			assert.equal(resource, target);
+			assert.deepEqual(plain(query), {});
+			assert.equal(signal.aborted, false);
+			return new Response(pdf);
+		},
+	}, target, token);
+	assert.deepEqual(Array.from(result), Array.from(pdf));
+	assert.ok(released);
+});
+
+test('PDF preview refuses an over-limit response before reading its body', async () => {
+	const { exports } = environment();
+	let cancelled = false;
+	const token = { onCancellationRequested: () => ({ dispose() {} }) };
+	await assert.rejects(exports.readPdfPreview({
+		async request() {
+			return {
+				headers: new Headers({ 'Content-Length': String(100 * 1024 * 1024 + 1) }),
+				body: { cancel: async () => { cancelled = true; } },
+				arrayBuffer() { assert.fail('oversized response should not be read'); },
+			};
+		},
+	}, uri, token), { reason: 'tooLarge' });
+	assert.ok(cancelled);
 });

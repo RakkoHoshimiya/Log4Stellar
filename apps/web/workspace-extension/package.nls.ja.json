@@ -7,6 +7,7 @@
   "workspace.preview": "文書をプレビュー",
   "workspace.previewVersion": "文書のバージョンをプレビュー",
   "workspace.officeEditor": "Log4Stellar Office プレビュー",
+  "workspace.pdfEditor": "Log4Stellar PDF プレビュー",
   "workspace.upload": "添付ファイルのアップロード",
   "workspace.advancedSearch": "バージョン履歴と添付ファイルの検索"
 }

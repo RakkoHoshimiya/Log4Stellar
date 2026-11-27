@@ -18,6 +18,7 @@
     "onCommand:log4stellar.workspace.preview",
     "onCommand:log4stellar.workspace.previewVersion",
     "onCustomEditor:log4stellar.officePreview",
+    "onCustomEditor:log4stellar.pdfPreview",
     "onView:log4stellar.knowledge",
     "onCommand:log4stellar.workspace.tenants"
   ],
@@ -143,6 +144,12 @@
           }
         ],
         "priority": "option"
+      },
+      {
+        "viewType": "log4stellar.pdfPreview",
+        "displayName": "%workspace.pdfEditor%",
+        "selector": [{ "filenamePattern": "*.[pP][dD][fF]" }],
+        "priority": "default"
       }
     ],
     "viewsContainers": {

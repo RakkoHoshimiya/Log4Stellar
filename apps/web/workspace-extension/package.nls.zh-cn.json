@@ -7,6 +7,7 @@
   "workspace.preview": "预览文档",
   "workspace.previewVersion": "预览文档版本",
   "workspace.officeEditor": "Log4Stellar Office 预览",
+  "workspace.pdfEditor": "Log4Stellar PDF 预览",
   "workspace.upload": "上传附件",
   "workspace.advancedSearch": "历史版本与附件搜索"
 }

@@ -7,6 +7,7 @@
   "workspace.preview": "Preview document",
   "workspace.previewVersion": "Preview document version",
   "workspace.officeEditor": "Log4Stellar Office Preview",
+  "workspace.pdfEditor": "Log4Stellar PDF Preview",
   "workspace.upload": "Upload attachment",
   "workspace.advancedSearch": "Search revisions and attachments"
 }

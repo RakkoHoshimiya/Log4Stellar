@@ -850,28 +850,39 @@ function configureOfficePreview(panel, extensionUri, messages, load, token) {
 	].join('');
 }
 
-function registerOfficeEditor(context, provider) {
-	const viewType = 'log4stellar.officePreview';
+function registerPreviewEditor(context, viewType, load) {
 	context.subscriptions.push(vscode.window.registerCustomEditorProvider(viewType, {
 		openCustomDocument(uri) {
 			return { uri, dispose() {} };
 		},
 		resolveCustomEditor(document, panel) {
-			const uri = document.uri;
 			const token = new vscode.CancellationTokenSource();
 			panel.webview.options = { enableScripts: true, localResourceRoots: [context.extensionUri] };
-			const labels = previewLabels[languageOf()];
-			configureOfficePreview(panel, context.extensionUri, labels, async () => {
-				const pending = await provider.requestOfficePreview(uri);
-				const ready = pending.state === 'ready' ? pending
-					: await pollPreviewStatus(provider, uri, pending.id, { token: token.token });
-				if (token.token.isCancellationRequested) {
-					throw Object.assign(new Error('PreviewCancelled'), { reason: 'cancelled' });
-				}
-				return provider.previewPdf(uri, ready.id);
-			}, token);
+			configureOfficePreview(panel, context.extensionUri, previewLabels[languageOf()],
+				() => load(document.uri, token.token), token);
 		},
 	}));
+}
+
+async function readPdfPreview(provider, uri, token) {
+	const abort = new AbortController();
+	const cancellation = token.onCancellationRequested(() => abort.abort());
+	try {
+		if (token.isCancellationRequested) abort.abort();
+		const response = await provider.request(uri, {}, { signal: abort.signal });
+		const maxBytes = 100 * 1024 * 1024;
+		if (Number(response.headers.get('Content-Length')) > maxBytes) {
+			await response.body?.cancel();
+			throw Object.assign(new Error('PdfTooLarge'), { reason: 'tooLarge' });
+		}
+		const bytes = new Uint8Array(await response.arrayBuffer());
+		if (bytes.length > maxBytes) {
+			throw Object.assign(new Error('PdfTooLarge'), { reason: 'tooLarge' });
+		}
+		return bytes;
+	} finally {
+		cancellation.dispose();
+	}
 }
 
 function escapeAttribute(value) {
@@ -1130,7 +1141,15 @@ async function activate(context) {
 	// surface, so a hit opens the note at the reported line like any other file hit.
 	context.subscriptions.push(vscode.workspace.registerTextSearchProvider(scheme, provider));
 
-	registerOfficeEditor(context, provider);
+	registerPreviewEditor(context, 'log4stellar.officePreview', async (uri, token) => {
+		const pending = await provider.requestOfficePreview(uri);
+		const ready = pending.state === 'ready' ? pending : await pollPreviewStatus(provider, uri, pending.id, { token });
+		if (token.isCancellationRequested) {
+			throw Object.assign(new Error('PreviewCancelled'), { reason: 'cancelled' });
+		}
+		return provider.previewPdf(uri, ready.id);
+	});
+	registerPreviewEditor(context, 'log4stellar.pdfPreview', (uri, token) => readPdfPreview(provider, uri, token));
 	if (typeof vscode.window.registerTreeDataProvider === 'function') {
 		registerKnowledgeView(context, provider);
 	}
@@ -1228,4 +1247,4 @@ async function activate(context) {
 	}
 }
 
-module.exports = { activate, openGitRepository, openOfficePreview, pollPreviewStatus, renderPreviewPane, WorkspaceFileSystem };
+module.exports = { activate, openGitRepository, openOfficePreview, pollPreviewStatus, renderPreviewPane, readPdfPreview, WorkspaceFileSystem };
